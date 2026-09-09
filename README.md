@@ -82,7 +82,7 @@ Output should match your selected Python path.
 # Installing python dependencies to run script
 
 All the that are needed to run the data analysis script have been listed out in the 
-requirements file. TO install these dependencies, run the following command: 
+requirements file. To install these dependencies, run the following command: 
 
  - conda install -r requirements.txt
 

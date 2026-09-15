@@ -17,6 +17,10 @@ import webbrowser
 from pathlib import Path
 from typing import Callable
 
+import matplotlib
+# The macosx backend and Tkinter each run their own native Cocoa event loop;
+# mixing them in one process causes intermittent segfaults, so force TkAgg.
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
@@ -67,7 +71,8 @@ def choose_nifti(root: tk.Tk, title: str, candidates: list[Path] | None = None) 
         return None
     selected = filedialog.askopenfilename(
         title=title,
-        filetypes=[("NIfTI images", "*.nii *.nii.gz"), ("All files", "*")],
+        message=title,
+        filetypes=[("NIfTI image (*.nii)", "*.nii"), ("Compressed NIfTI image (*.gz)", "*.gz"), ("All files", "*.*")],
         parent=root,
     )
     return Path(selected) if selected else None
@@ -356,11 +361,17 @@ def run() -> None:
             return
         mask_name = filedialog.askopenfilename(
             title="Choose a mask (Cancel for no mask)",
-            filetypes=[("NIfTI images", "*.nii *.nii.gz"), ("All files", "*")],
+            message="Choose a mask (Cancel for no mask)",
+            filetypes=[("NIfTI image (*.nii)", "*.nii"), ("Compressed NIfTI image (*.gz)", "*.gz"), ("All files", "*.*")],
             parent=root,
         )
         mask = Path(mask_name) if mask_name else None
-        output_name = filedialog.askdirectory(title="Choose output folder", initialdir=str(functional.parent), parent=root)
+        output_name = filedialog.askdirectory(
+            title="Choose output folder",
+            message="Choose output folder",
+            initialdir=str(functional.parent),
+            parent=root,
+        )
         if not output_name:
             return
         folders = make_dirs(Path(output_name))

@@ -94,6 +94,22 @@ pip install --no-deps brkraw==0.3.11
 ⚠️ Please note that AFNI and FSL must be installed separately and available in your system PATH.
 Nipype only provides Python interfaces to these tools.
 
+## Popup-driven filtering and decomposition workflow
+
+`filtering_decomposition_v24.py` is the Python version of the BLuSH filtering,
+QC, SCM, and decomposition workflow. It no longer requires
+`cleaned_mc_func.nii.gz` or the mask to be in the current directory. Start it
+from VS Code or a terminal:
+
+```bash
+python filtering_decomposition_v24.py
+```
+
+The script opens dialogs for the cleaned functional NIfTI, an optional mask,
+and the output folder. Numeric settings are requested in popup dialogs, and
+the component plots remain interactive: click components to drop them and
+press Enter to save the selected decomposition.
+
 
 
 ## PS Group Analysis Script - 28.05.26

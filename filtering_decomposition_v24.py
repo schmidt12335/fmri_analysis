@@ -354,6 +354,9 @@ def make_summary(folders: dict[str, Path]) -> Path:
 def run() -> None:
     root = tk.Tk()
     root.withdraw()
+    # Without this, dialogs can open behind other apps on macOS, making it look
+    # like the same prompt keeps reappearing when a hidden one is still waiting.
+    root.attributes("-topmost", True)
     root.title("BLuSH v24")
     try:
         functional = choose_nifti(root, "Choose cleaned functional NIfTI")

@@ -1,8 +1,45 @@
 #!/usr/bin/env python3
-"""Pick timeseries files via dialogs, then plot each group's mean timeseries
-with the control group's mean subtracted, plus the detailed group-analysis
-plot (mean +/- semi-std timecourse and a signal-change inset with stats)
-comparing each group against the control."""
+"""Group-vs-control timeseries analysis (BLuSH ctrl_analysis).
+
+What it does
+------------
+1. Loads per-subject percent-signal-change (PSC) timeseries .txt files for a
+   control group and one or more experimental groups (any file with
+   "PSC_time_series" in its name inside a folder is picked up automatically).
+2. Averages subjects within each group and computes an asymmetric
+   (semi) standard deviation band around each group mean.
+3. For every experimental group, plots its mean timeseries against the
+   control's mean timeseries (optionally including the group-minus-control
+   difference curve), shades the baseline/injection/signal windows, and adds
+   an inset bar plot of subject-wise signal changes with a Welch's t-test and
+   significance stars.
+4. After each plot is shown, asks whether to save it (300 dpi PNG) into that
+   group's own data folder.
+
+How to configure it
+--------------------
+Edit the constants below before running:
+- BASELINE_WINDOW / INJECTION_WINDOW / SIGNAL_WINDOW: frame ranges (1 frame
+  = 1 second) used for the shaded regions and the baseline-vs-signal change
+  used in the stats/inset plot.
+- SMOOTH_WINDOW: moving-average window (in frames) applied to the mean and
+  std traces before plotting; 1 disables smoothing.
+- CONTROL_NAME / CONTROL_FOLDER: display name and data folder for the
+  control group. Leave CONTROL_FOLDER = "" to be prompted for a folder.
+- GROUP_FOLDERS: dict of {group name: folder path}. Leave as {} to be
+  prompted interactively (you can add as many groups as you like, one at a
+  time, until you cancel the name prompt).
+- CONTROL_INSET_LABEL / GROUP_INSET_LABELS: optional short labels used only
+  for the inset bar plot's x-axis ticks (falls back to the names above).
+
+Running it
+----------
+Just run the script (`python ctrl_analysis.py`). If CONTROL_FOLDER/
+GROUP_FOLDERS are filled in, no dialogs are needed except the yes/no
+"plot the difference curve?" and "save this plot?" prompts. Otherwise,
+folder-picker/name dialogs guide you through selecting the control and each
+group.
+"""
 
 from pathlib import Path
 
@@ -49,11 +86,17 @@ GROUP_INSET_LABELS: dict[str, str] = {
 
 
 def select_group_folder(root: tk.Tk, title: str) -> Path | None:
+    """Show a folder-picker dialog and return the chosen path, or None if cancelled."""
     folder = filedialog.askdirectory(title=title, message=title, parent=root)
     return Path(folder) if folder else None
 
 
 def find_psc_files(folder: str | Path) -> list[Path]:
+    """Recursively find subject timeseries files ("*PSC_time_series*") in a folder.
+
+    Skips macOS AppleDouble sidecar files (names starting with "._") that can
+    appear on SMB/exFAT network shares and are not valid text data.
+    """
     return sorted(
         p for p in Path(folder).rglob("*PSC_time_series*")
         if p.is_file() and not p.name.startswith("._")
@@ -61,6 +104,10 @@ def find_psc_files(folder: str | Path) -> list[Path]:
 
 
 def load_group(paths: list[Path]) -> np.ndarray:
+    """Load each subject's timeseries .txt file into a (subjects, timepoints) array.
+
+    Files are trimmed to the shortest file's length if they differ.
+    """
     series = [np.loadtxt(path) for path in paths]
     min_len = min(len(s) for s in series)
     if any(len(s) != min_len for s in series):
@@ -82,6 +129,7 @@ def semi_std(data: np.ndarray, axis: int = 0) -> tuple[np.ndarray, np.ndarray]:
 
 
 def p_to_stars(p: float) -> str:
+    """Convert a p-value to a conventional significance annotation (***/**/*/n.s.)."""
     if p < 0.001:
         return "***"
     elif p < 0.01:
@@ -92,6 +140,7 @@ def p_to_stars(p: float) -> str:
 
 
 def signal_changes(data: np.ndarray, baseline: tuple[int, int], signal: tuple[int, int]) -> np.ndarray:
+    """Per-subject (signal window mean - baseline window mean), used for stats/inset plot."""
     baseline_mean = np.mean(data[:, baseline[0]:baseline[1]], axis=1)
     signal_mean = np.mean(data[:, signal[0]:signal[1]], axis=1)
     return signal_mean - baseline_mean
@@ -112,6 +161,14 @@ def plot_group_vs_control(
     save_folder: Path,
     root: tk.Tk,
 ) -> None:
+    """Plot one experimental group's mean timeseries against the control's.
+
+    Draws the group and control mean +/- semi-std bands (optionally with the
+    group-minus-control difference curve), shades the baseline/injection/
+    signal windows, and adds an inset bar plot of subject-wise signal changes
+    with a Welch's t-test and significance stars. After the figure is shown,
+    prompts whether to save it (300 dpi PNG) into `save_folder`.
+    """
     length = min(group_data.shape[1], control_data.shape[1])
     group_data = group_data[:, :length]
     control_data = control_data[:, :length]
@@ -188,12 +245,15 @@ def plot_group_vs_control(
     plt.show()
 
     if messagebox.askyesno("Save plot", f"Save the '{name}' plot to {save_folder}?", parent=root):
-        target = save_folder / f"{name}_vs_{control_name}_group_analysis.png"
+        suffix = "group_analysis" if show_diff else "group_analysis_no_diff"
+        target = save_folder / f"{name}_vs_{control_name}_{suffix}.png"
         fig.savefig(target, dpi=300)
         print(f"[OK] Saved {target}")
 
 
 def run() -> None:
+    """Load the control and experimental groups (from constants or dialogs) and
+    plot each experimental group against the control."""
     root = tk.Tk()
     # Setting -topmost before withdraw avoids macOS briefly showing an empty root window.
     root.attributes("-topmost", True)

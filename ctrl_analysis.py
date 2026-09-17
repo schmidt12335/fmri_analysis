@@ -70,18 +70,18 @@ SMOOTH_WINDOW = 60
 # with "PSC_time_series" in its name inside a folder is picked up automatically,
 # so the number of subject files per group/control is not fixed.
 # Leave CONTROL_FOLDER empty and/or GROUP_FOLDERS empty ({}) to be prompted instead.
-CONTROL_NAME = "Ctrl-AAV 1mM Sero"
+CONTROL_NAME = "Ctrl-AAV + 1mM Sero"
 CONTROL_FOLDER: str = "/Volumes/pschmidt/fmri_analysis/AnalysedData/Sero/group_data/timeseries/Ctrl"
-EXP_NAME = "Sero-AAV 1mM Sero"
+EXP_NAME = "Sero-AAV + 1mM Sero"
 GROUP_FOLDERS: dict[str, str] = {
-        "Sero-AAV 1mM Sero": "/Volumes/pschmidt/fmri_analysis/AnalysedData/Sero/group_data/timeseries/1mM",
+        "Sero-AAV + 1mM Sero": "/Volumes/pschmidt/fmri_analysis/AnalysedData/Sero/group_data/timeseries/1mM",
 }
 
 # Optional: short labels for the inset bar plot's x-axis ticks. Falls back to
 # CONTROL_NAME / the group name above when left blank.
-CONTROL_INSET_LABEL = "Ctrl"
+CONTROL_INSET_LABEL = "Ctrl\nn=1"
 GROUP_INSET_LABELS: dict[str, str] = {
-        "Sero-AAV 1mM Sero": "Exp.",
+        "Sero-AAV + 1mM Sero": "Sero\nn=3",
 }
 
 

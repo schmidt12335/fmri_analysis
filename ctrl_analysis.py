@@ -6,8 +6,8 @@ What it does
 1. Loads per-subject percent-signal-change (PSC) timeseries .txt files for a
    control group and one or more experimental groups (any file with
    "PSC_time_series" in its name inside a folder is picked up automatically).
-2. Averages subjects within each group and computes an asymmetric
-   (semi) standard deviation band around each group mean.
+2. Averages subjects within each group and computes the standard error of
+   the mean (SEM) band around each group mean.
 3. For every experimental group, plots its mean timeseries against the
    control's mean timeseries (optionally including the group-minus-control
    difference curve), shades the baseline/injection/signal windows, and adds
@@ -115,17 +115,9 @@ def load_group(paths: list[Path]) -> np.ndarray:
     return np.array([s[:min_len] for s in series])
 
 
-def semi_std(data: np.ndarray, axis: int = 0) -> tuple[np.ndarray, np.ndarray]:
-    """Asymmetric (semi) standard deviation: upper_std from above-mean samples,
-    lower_std from below-mean samples."""
-    mean = np.mean(data, axis=axis, keepdims=True)
-    diff = data - mean
-    upper_sq = np.where(diff > 0, diff ** 2, np.nan)
-    lower_sq = np.where(diff < 0, diff ** 2, np.nan)
-    with np.errstate(invalid="ignore"):
-        upper_std = np.sqrt(np.nanmean(upper_sq, axis=axis))
-        lower_std = np.sqrt(np.nanmean(lower_sq, axis=axis))
-    return np.nan_to_num(upper_std, nan=0.0), np.nan_to_num(lower_std, nan=0.0)
+def sem(data: np.ndarray, axis: int = 0) -> np.ndarray:
+    """Standard error of the mean along `axis`."""
+    return np.std(data, axis=axis, ddof=1) / np.sqrt(data.shape[axis])
 
 
 def p_to_stars(p: float) -> str:
@@ -163,7 +155,7 @@ def plot_group_vs_control(
 ) -> None:
     """Plot one experimental group's mean timeseries against the control's.
 
-    Draws the group and control mean +/- semi-std bands (optionally with the
+    Draws the group and control mean +/- SEM bands (optionally with the
     group-minus-control difference curve), shades the baseline/injection/
     signal windows, and adds an inset bar plot of subject-wise signal changes
     with a Welch's t-test and significance stars. After the figure is shown,
@@ -174,14 +166,14 @@ def plot_group_vs_control(
     control_data = control_data[:, :length]
 
     mean_group = np.mean(group_data, axis=0)
-    std_upper_group, std_lower_group = semi_std(group_data, axis=0)
+    sem_group = sem(group_data, axis=0)
     mean_control = np.mean(control_data, axis=0)
-    std_upper_control, std_lower_control = semi_std(control_data, axis=0)
+    sem_control = sem(control_data, axis=0)
 
     if smooth > 1:
-        mean_group, std_upper_group, std_lower_group, mean_control, std_upper_control, std_lower_control = (
+        mean_group, sem_group, mean_control, sem_control = (
             uniform_filter1d(series, size=smooth, mode="nearest")
-            for series in (mean_group, std_upper_group, std_lower_group, mean_control, std_upper_control, std_lower_control)
+            for series in (mean_group, sem_group, mean_control, sem_control)
         )
 
     group_change = signal_changes(group_data, baseline, signal)
@@ -199,8 +191,8 @@ def plot_group_vs_control(
     time = np.arange(length) / 60  # frames are 1 second each
     ax.plot(time, mean_group, label=name, color="C0", linewidth=2, zorder=10)
     ax.plot(time, mean_control, label=control_name, color="C1", linewidth=2, zorder=10)
-    ax.fill_between(time, mean_group - std_lower_group, mean_group + std_upper_group, color="C0", alpha=0.2, zorder=9)
-    ax.fill_between(time, mean_control - std_lower_control, mean_control + std_upper_control, color="C1", alpha=0.2, zorder=8)
+    ax.fill_between(time, mean_group - sem_group, mean_group + sem_group, color="C0", alpha=0.2, zorder=9)
+    ax.fill_between(time, mean_control - sem_control, mean_control + sem_control, color="C1", alpha=0.2, zorder=8)
     if show_diff:
         ax.plot(time, mean_group - mean_control, label=f"{name} - {control_name}", color="C2", linewidth=2, zorder=10)
     ax.axvspan(baseline[0] / 60, baseline[1] / 60, color="#9e9e9e", alpha=0.18, zorder=1)

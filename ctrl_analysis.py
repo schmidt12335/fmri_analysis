@@ -44,6 +44,7 @@ group.
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 import numpy as np
 from scipy import stats
 from scipy.ndimage import uniform_filter1d
@@ -64,24 +65,25 @@ plt.rcParams.update({
 BASELINE_WINDOW = (180, 480)
 INJECTION_WINDOW = (600, 1200)
 SIGNAL_WINDOW = (1800, 2100)
-SMOOTH_WINDOW = 60
+SMOOTH_WINDOW = 120
 
 # Optional: point these at folders to skip the file-picker dialogs. Every file
 # with "PSC_time_series" in its name inside a folder is picked up automatically,
 # so the number of subject files per group/control is not fixed.
 # Leave CONTROL_FOLDER empty and/or GROUP_FOLDERS empty ({}) to be prompted instead.
-CONTROL_NAME = "Ctrl-AAV + 1mM Sero"
-CONTROL_FOLDER: str = "/Volumes/pschmidt/fmri_analysis/AnalysedData/Sero/group_data/timeseries/Ctrl"
-EXP_NAME = "Sero-AAV + 1mM Sero"
+CONTROL_NAME = "Ctrl-AAV + 150uM Sero"
+CONTROL_FOLDER: str = "/Volumes/pschmidt/fmri_analysis/AnalysedData/Sero/group_data/timeseries/Ctrl_150uM"
+EXP_NAME = "Sero-AAV + 150uM Sero"
 GROUP_FOLDERS: dict[str, str] = {
-        "Sero-AAV + 1mM Sero": "/Volumes/pschmidt/fmri_analysis/AnalysedData/Sero/group_data/timeseries/1mM",
+        "Sero-AAV + 150uM Sero": "/Volumes/pschmidt/fmri_analysis/AnalysedData/Sero/group_data/timeseries/150uM",
 }
 
-# Optional: short labels for the inset bar plot's x-axis ticks. Falls back to
-# CONTROL_NAME / the group name above when left blank.
-CONTROL_INSET_LABEL = "Ctrl\nn=1"
+# Optional: short name prefixes for the inset bar plot's x-axis ticks (falls back
+# to CONTROL_NAME / the group name above when left blank). The "n=..." subject
+# count is always appended automatically from the number of files actually loaded.
+CONTROL_INSET_LABEL = "Ctrl-AAV + Sero"
 GROUP_INSET_LABELS: dict[str, str] = {
-        "Sero-AAV + 1mM Sero": "Sero\nn=3",
+        "Sero-AAV + 150uM Sero": "Sero-AVATar + Sero",
 }
 
 
@@ -187,21 +189,28 @@ def plot_group_vs_control(
         np.std(control_change, ddof=1) / np.sqrt(len(control_change)),
     ]
 
+    # Short names (drop the "\nn=..." suffix) keep the legend compact.
+    group_label = group_inset_label.split("\n")[0]
+    control_label = control_inset_label.split("\n")[0]
+    group_color, control_color, diff_color = "tab:red", "tab:green", "tab:blue"
+
     fig, ax = plt.subplots(figsize=(10, 6))
     time = np.arange(length) / 60  # frames are 1 second each
-    ax.plot(time, mean_group, label=name, color="C0", linewidth=2, zorder=10)
-    ax.plot(time, mean_control, label=control_name, color="C1", linewidth=2, zorder=10)
-    ax.fill_between(time, mean_group - sem_group, mean_group + sem_group, color="C0", alpha=0.2, zorder=9)
-    ax.fill_between(time, mean_control - sem_control, mean_control + sem_control, color="C1", alpha=0.2, zorder=8)
+    ax.plot(time, mean_group, label=group_label, color=group_color, linewidth=2, zorder=10)
+    ax.plot(time, mean_control, label=control_label, color=control_color, linewidth=2, zorder=10)
+    ax.fill_between(time, mean_group - sem_group, mean_group + sem_group, color=group_color, alpha=0.2, zorder=9)
+    ax.fill_between(time, mean_control - sem_control, mean_control + sem_control, color=control_color, alpha=0.2, zorder=8)
     if show_diff:
-        ax.plot(time, mean_group - mean_control, label=f"{name} - {control_name}", color="C2", linewidth=2, zorder=10)
+        ax.plot(time, mean_group - mean_control, label="Difference", color=diff_color, linewidth=2, zorder=10)
     ax.axvspan(baseline[0] / 60, baseline[1] / 60, color="#9e9e9e", alpha=0.18, zorder=1)
     ax.axvspan(injection[0] / 60, injection[1] / 60, color="#e07a5f", alpha=0.18, zorder=1)
     ax.axvspan(signal[0] / 60, signal[1] / 60, color="#3d5a80", alpha=0.18, zorder=1)
     ax.axhline(0, color="black", linewidth=0.8)
     ax.set_xlabel("Time [min]")
     ax.set_ylabel("PSC [%]")
-    ax.legend(loc="upper center")
+    # Anchor the legend at x=15 min (data coords) but keep y near the top of the axes.
+    legend_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+    ax.legend(loc="upper left", bbox_to_anchor=(10, 0.98), bbox_transform=legend_transform, ncol=1)
     ax.grid(axis="y", linestyle="--", alpha=0.25, zorder=0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -212,7 +221,7 @@ def plot_group_vs_control(
     x_inset = np.arange(2)
     ax_inset = ax.inset_axes([0.075, 0.7, 0.125, 0.25])
     ax_inset.set_facecolor("#f5f5f5")
-    ax_inset.bar(x_inset, means, yerr=sems, capsize=4, color=["C0", "C1"], edgecolor="black", linewidth=1, alpha=0.85, zorder=2)
+    ax_inset.bar(x_inset, means, yerr=sems, capsize=4, color=[group_color, control_color], edgecolor="black", linewidth=1, alpha=0.85, zorder=2)
     for i, changes in enumerate((group_change, control_change)):
         ax_inset.scatter(np.full(len(changes), x_inset[i]), changes, color="black", s=18, zorder=3)
 
@@ -226,8 +235,9 @@ def plot_group_vs_control(
     ax_inset.plot([x_inset[0], x_inset[0], x_inset[1], x_inset[1]], [y_sig, y_sig + h, y_sig + h, y_sig], color="black", linewidth=1, zorder=10)
     ax_inset.text(np.mean(x_inset), y_sig + h, stars, ha="center", va="bottom", fontsize=10, zorder=10)
     ax_inset.axhline(0, color="black", linewidth=0.8)
+    n_labels = [label.split("\n")[-1] for label in (group_inset_label, control_inset_label)]
     ax_inset.set_xticks(x_inset)
-    ax_inset.set_xticklabels([group_inset_label, control_inset_label], fontsize=8)
+    ax_inset.set_xticklabels(n_labels, fontsize=8)
     ax_inset.set_ylabel("ΔPSC [%]", fontsize=8)
     ax_inset.tick_params(axis="both", labelsize=8)
     ax_inset.spines["top"].set_visible(False)
@@ -301,9 +311,9 @@ def run() -> None:
     smooth = SMOOTH_WINDOW
 
     # Detailed group-analysis plot (timecourse + signal-change stats) per group vs control.
-    control_inset_label = CONTROL_INSET_LABEL or CONTROL_NAME
+    control_inset_label = f"{CONTROL_INSET_LABEL or CONTROL_NAME}\nn={control_data.shape[0]}"
     for name, (data, folder) in groups.items():
-        group_inset_label = GROUP_INSET_LABELS.get(name) or name
+        group_inset_label = f"{GROUP_INSET_LABELS.get(name) or name}\nn={data.shape[0]}"
         plot_group_vs_control(
             name, data, control_data, CONTROL_NAME, group_inset_label, control_inset_label,
             baseline, injection, signal, smooth, show_diff, folder, root,

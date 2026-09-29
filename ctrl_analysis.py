@@ -10,11 +10,11 @@ What it does
    the mean (SEM) band around each group mean.
 3. For every experimental group, plots its mean timeseries against the
    control's mean timeseries (optionally including the group-minus-control
-   difference curve), shades the baseline/injection/signal windows, and adds
-   an inset bar plot of subject-wise signal changes with a Welch's t-test and
-   significance stars.
-4. After each plot is shown, asks whether to save it (300 dpi PNG) into that
-   group's own data folder.
+   difference curve) and shades the baseline/injection/signal windows, and
+   as a separate figure, a bar plot of subject-wise signal changes with a
+   Welch's t-test and significance stars.
+4. After each pair of plots is shown, asks whether to save both (300 dpi PNG)
+   into that group's own data folder.
 
 How to configure it
 --------------------
@@ -30,7 +30,7 @@ Edit the constants below before running:
   prompted interactively (you can add as many groups as you like, one at a
   time, until you cancel the name prompt).
 - CONTROL_INSET_LABEL / GROUP_INSET_LABELS: optional short labels used only
-  for the inset bar plot's x-axis ticks (falls back to the names above).
+  for the bar plot's x-axis ticks (falls back to the names above).
 
 Running it
 ----------
@@ -78,7 +78,7 @@ GROUP_FOLDERS: dict[str, str] = {
         "Sero-AAV + 150uM Sero": "/Volumes/pschmidt/fmri_analysis/AnalysedData/Sero/group_data/timeseries/150uM",
 }
 
-# Optional: short name prefixes for the inset bar plot's x-axis ticks (falls back
+# Optional: short name prefixes for the bar plot's x-axis ticks (falls back
 # to CONTROL_NAME / the group name above when left blank). The "n=..." subject
 # count is always appended automatically from the number of files actually loaded.
 CONTROL_INSET_LABEL = "Ctrl-AAV + Sero"
@@ -134,7 +134,7 @@ def p_to_stars(p: float) -> str:
 
 
 def signal_changes(data: np.ndarray, baseline: tuple[int, int], signal: tuple[int, int]) -> np.ndarray:
-    """Per-subject (signal window mean - baseline window mean), used for stats/inset plot."""
+    """Per-subject (signal window mean - baseline window mean), used for stats/bar plot."""
     baseline_mean = np.mean(data[:, baseline[0]:baseline[1]], axis=1)
     signal_mean = np.mean(data[:, signal[0]:signal[1]], axis=1)
     return signal_mean - baseline_mean
@@ -158,10 +158,11 @@ def plot_group_vs_control(
     """Plot one experimental group's mean timeseries against the control's.
 
     Draws the group and control mean +/- SEM bands (optionally with the
-    group-minus-control difference curve), shades the baseline/injection/
-    signal windows, and adds an inset bar plot of subject-wise signal changes
-    with a Welch's t-test and significance stars. After the figure is shown,
-    prompts whether to save it (300 dpi PNG) into `save_folder`.
+    group-minus-control difference curve) and shades the baseline/injection/
+    signal windows in one figure, and a separate bar plot of subject-wise
+    signal changes with a Welch's t-test and significance stars in another.
+    After both figures are shown, prompts whether to save them (300 dpi PNG)
+    into `save_folder`.
     """
     length = min(group_data.shape[1], control_data.shape[1])
     group_data = group_data[:, :length]
@@ -202,28 +203,36 @@ def plot_group_vs_control(
     ax.fill_between(time, mean_control - sem_control, mean_control + sem_control, color=control_color, alpha=0.2, zorder=8)
     if show_diff:
         ax.plot(time, mean_group - mean_control, label="Difference", color=diff_color, linewidth=2, zorder=10)
-    ax.axvspan(baseline[0] / 60, baseline[1] / 60, color="#9e9e9e", alpha=0.18, zorder=1)
     ax.axvspan(injection[0] / 60, injection[1] / 60, color="#e07a5f", alpha=0.18, zorder=1)
-    ax.axvspan(signal[0] / 60, signal[1] / 60, color="#3d5a80", alpha=0.18, zorder=1)
     ax.axhline(0, color="black", linewidth=0.8)
-    ax.set_xlabel("Time [min]")
-    ax.set_ylabel("PSC [%]")
+    ax.set_xlabel("Time [min]", fontweight="bold")
+    ax.set_ylabel("Signal Change [%]", fontweight="bold")
     # Anchor the legend at x=15 min (data coords) but keep y near the top of the axes.
     legend_transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
-    ax.legend(loc="upper left", bbox_to_anchor=(10, 0.98), bbox_transform=legend_transform, ncol=1)
+    ax.legend(loc="upper left", ncol=1)
+    legend = ax.legend(loc="upper left", ncol=1)
+    plt.setp(legend.get_texts(), fontweight="bold")
     ax.grid(axis="y", linestyle="--", alpha=0.25, zorder=0)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+    plt.setp(ax.get_xticklabels() + ax.get_yticklabels(), fontweight="bold")
 
-    for (start, end), text in ((baseline, "Baseline"), (injection, "Injection"), (signal, "Signal")):
-        ax.text((start / 60 + end / 60) / 2, 0.02, text, transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=8)
+    ax.text(np.mean(injection) / 60, 0.01, "Injection", transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=8, fontweight="bold")
 
-    x_inset = np.arange(2)
-    ax_inset = ax.inset_axes([0.075, 0.7, 0.125, 0.25])
-    ax_inset.set_facecolor("#f5f5f5")
-    ax_inset.bar(x_inset, means, yerr=sems, capsize=4, color=[group_color, control_color], edgecolor="black", linewidth=1, alpha=0.85, zorder=2)
+    plt.tight_layout()
+
+    # Signal-change bar plot, as its own standalone figure styled to match the timecourse plot.
+    x_bar = np.arange(2)
+    bar_width = 0.6
+    rng = np.random.default_rng(0)
+    fig_bar, ax_bar = plt.subplots(figsize=(4, 5))
+    ax_bar.bar(
+        x_bar, means, yerr=sems, width=bar_width, capsize=5, error_kw={"elinewidth": 1.2, "ecolor": "black"},
+        color=[group_color, control_color], edgecolor=["darkred", "darkgreen"], linewidth=1.2, alpha=0.85, zorder=2,
+    )
     for i, changes in enumerate((group_change, control_change)):
-        ax_inset.scatter(np.full(len(changes), x_inset[i]), changes, color="black", s=18, zorder=3)
+        jitter = rng.uniform(-0.12, 0.12, size=len(changes))
+        ax_bar.scatter(x_bar[i] + jitter, changes, color="black", edgecolor="white", linewidth=0.5, s=32, alpha=0.8, zorder=3)
 
     stars = p_to_stars(p_value)
     all_values = np.concatenate([group_change, control_change])
@@ -231,26 +240,31 @@ def plot_group_vs_control(
     y_range = (y_max - y_min) or 1
     y_sig = y_max + 0.20 * y_range
     h = 0.08 * y_range
-    ax_inset.set_ylim(y_min - 0.15 * y_range, y_sig + h + 0.25 * y_range)
-    ax_inset.plot([x_inset[0], x_inset[0], x_inset[1], x_inset[1]], [y_sig, y_sig + h, y_sig + h, y_sig], color="black", linewidth=1, zorder=10)
-    ax_inset.text(np.mean(x_inset), y_sig + h, stars, ha="center", va="bottom", fontsize=10, zorder=10)
-    ax_inset.axhline(0, color="black", linewidth=0.8)
+    ax_bar.set_ylim(y_min - 0.15 * y_range, y_sig + h + 0.25 * y_range)
+    ax_bar.set_xlim(x_bar[0] - 0.6, x_bar[1] + 0.6)
+    ax_bar.plot([x_bar[0], x_bar[0], x_bar[1], x_bar[1]], [y_sig, y_sig + h, y_sig + h, y_sig], color="black", linewidth=2.2, zorder=10)
+    ax_bar.text(np.mean(x_bar), y_sig + h, stars, ha="center", va="bottom", fontsize=16, fontweight="bold", zorder=10)
+    ax_bar.axhline(0, color="black", linewidth=0.8)
     n_labels = [label.split("\n")[-1] for label in (group_inset_label, control_inset_label)]
-    ax_inset.set_xticks(x_inset)
-    ax_inset.set_xticklabels(n_labels, fontsize=8)
-    ax_inset.set_ylabel("ΔPSC [%]", fontsize=8)
-    ax_inset.tick_params(axis="both", labelsize=8)
-    ax_inset.spines["top"].set_visible(False)
-    ax_inset.spines["right"].set_visible(False)
+    ax_bar.set_xticks(x_bar)
+    ax_bar.set_xticklabels(n_labels)
+    ax_bar.set_ylabel("Signal Change [%]", fontweight="bold")
+    ax_bar.grid(axis="y", linestyle="--", alpha=0.25, zorder=0)
+    ax_bar.spines["top"].set_visible(False)
+    ax_bar.spines["right"].set_visible(False)
+    plt.setp(ax_bar.get_xticklabels() + ax_bar.get_yticklabels(), fontweight="bold")
+    fig_bar.tight_layout()
 
-    plt.tight_layout()
     plt.show()
 
-    if messagebox.askyesno("Save plot", f"Save the '{name}' plot to {save_folder}?", parent=root):
+    if messagebox.askyesno("Save plot", f"Save the '{name}' plots to {save_folder}?", parent=root):
         suffix = "group_analysis" if show_diff else "group_analysis_no_diff"
         target = save_folder / f"{name}_vs_{control_name}_{suffix}.png"
         fig.savefig(target, dpi=300)
         print(f"[OK] Saved {target}")
+        bar_target = save_folder / f"{name}_vs_{control_name}_signal_change_bar.png"
+        fig_bar.savefig(bar_target, dpi=300)
+        print(f"[OK] Saved {bar_target}")
 
 
 def run() -> None:

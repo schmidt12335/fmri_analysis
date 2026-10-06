@@ -298,7 +298,12 @@ def bruker_to_nifti(in_path, scan_number, work_dir, out_name):
                     n_echo_images = 1
                 break
 
-    src_files = sorted(f for f in work_dir.glob(f"*{scan_number}*.nii*") if f.is_file())
+    # Skip macOS "._" AppleDouble files (SMB shares) and our own outputs from an earlier run in the same work_dir
+    src_files = sorted(
+        f for f in work_dir.glob(f"*{scan_number}*.nii*")
+        if f.is_file() and not f.name.startswith("._")
+        and not f.name.endswith(("_combined.nii.gz", "_epi_raw.nii.gz"))
+    )
     if not src_files:
         raise RuntimeError(f"No NIfTI files found after brkraw conversion for scan {scan_number} in {work_dir}")
 
@@ -325,7 +330,10 @@ def bruker_to_nifti(in_path, scan_number, work_dir, out_name):
     bids_pe_value = None
     detected_axis = None
     detected_sign = None
-    json_candidates = sorted(work_dir.glob(f"*{scan_number}*.json"))
+    json_candidates = sorted(
+        f for f in work_dir.glob(f"*{scan_number}*.json")
+        if not f.name.startswith("._") and not f.name.endswith(".detected_pe.json")
+    )
     if json_candidates:
         try:
             with open(json_candidates[0]) as jf:
@@ -386,7 +394,12 @@ def resolve_scan_input(entry, conversion_root):
         in_path = p.parent
         scan_number = p.name
         work_dir = Path(conversion_root) / f"scan_{scan_number}"
-        return bruker_to_nifti(in_path, scan_number, work_dir, f"{scan_number}_epi_raw.nii.gz")
+        out_name = f"{scan_number}_epi_raw.nii.gz"
+        converted = work_dir / out_name
+        if converted.is_file() and _pe_sidecar_path(converted).is_file():
+            print_statement(f"Scan {scan_number} already converted. Skipping conversion.", bcolors.OKGREEN)
+            return converted
+        return bruker_to_nifti(in_path, scan_number, work_dir, out_name)
     return p
 
 
@@ -821,6 +834,8 @@ def _epi_output_subdir_name(entry, used_names):
     p = Path(entry)
     if is_bruker_raw_scan_dir(p):
         base = f"scan_{p.name}"
+    elif p.name.endswith("_epi_raw.nii.gz") and p.parent.name.startswith("scan_"):
+        base = p.parent.name  # already converted by resolve_scan_input()
     else:
         name = p.name
         for suffix in (".nii.gz", ".nii"):
@@ -849,6 +864,7 @@ def distortion_correct_multiple_epis(
     rev_vol_index=0,
     config="b02b0.cnf",
     interp_method="jac",
+    skip_existing=False,
 ):
     """Correct one or more --epi scans (e.g. multiple functional runs that
     will later be stitched together) against a SINGLE shared --rev_pe_epi
@@ -857,11 +873,14 @@ def distortion_correct_multiple_epis(
     gets its own output subfolder under out_dir (named after its scan
     number/filename, see _epi_output_subdir_name()) so per-scan
     intermediates (blip_main.nii.gz, topup_results*, etc.) never collide.
+    With skip_existing=True, an EPI whose epi_distortion_corrected.nii.gz
+    already exists is not recomputed.
     Returns a list of corrected-file paths, in the same order as
-    epi_files."""
+    epi_files. The working directory is restored afterwards."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir = out_dir.resolve()
+    original_cwd = os.getcwd()
 
     conversion_dir = out_dir / "converted_raw"
     rev_pe_resolved = str(Path(resolve_scan_input(rev_pe_file, conversion_dir)).resolve())
@@ -869,28 +888,141 @@ def distortion_correct_multiple_epis(
     used_names = set()
     corrected_files = []
     n = len(epi_files)
-    for i, epi_entry in enumerate(epi_files, start=1):
-        subdir_name = _epi_output_subdir_name(epi_entry, used_names)
-        print_header(f"Distortion correction: EPI {i}/{n} ({subdir_name})", bcolors.HEADER)
-        corrected_file = distortion_correct_epi(
-            epi_entry,
-            rev_pe_resolved,
-            out_dir / subdir_name,
-            pe_axis=pe_axis,
-            main_sign=main_sign,
-            readout_time=readout_time,
-            epi_vol_index=epi_vol_index,
-            rev_vol_index=rev_vol_index,
-            config=config,
-            interp_method=interp_method,
-        )
-        corrected_files.append(corrected_file)
+    try:
+        for i, epi_entry in enumerate(epi_files, start=1):
+            subdir_name = _epi_output_subdir_name(epi_entry, used_names)
+            existing = out_dir / subdir_name / "epi_distortion_corrected.nii.gz"
+            if skip_existing and existing.is_file() and existing.stat().st_size > 0:
+                print_statement(f"EPI {i}/{n} ({subdir_name}) already distortion corrected. Skipping.", bcolors.OKGREEN)
+                corrected_files.append(existing)
+                continue
+            print_header(f"Distortion correction: EPI {i}/{n} ({subdir_name})", bcolors.HEADER)
+            corrected_file = distortion_correct_epi(
+                epi_entry,
+                rev_pe_resolved,
+                out_dir / subdir_name,
+                pe_axis=pe_axis,
+                main_sign=main_sign,
+                readout_time=readout_time,
+                epi_vol_index=epi_vol_index,
+                rev_vol_index=rev_vol_index,
+                config=config,
+                interp_method=interp_method,
+            )
+            corrected_files.append(corrected_file)
+    finally:
+        os.chdir(original_cwd)
 
     print_header(f"All {n} EPI(s) corrected", bcolors.HEADER)
     for epi_entry, corrected_file in zip(epi_files, corrected_files):
         print_statement(f"  {epi_entry} -> {corrected_file}", bcolors.OKGREEN)
 
     return corrected_files
+
+
+def run_with_confirmation(
+    epi_files,
+    rev_pe_file,
+    out_dir,
+    pe_axis=None,
+    main_sign=None,
+    readout_time=0.05,
+    epi_vol_index=0,
+    rev_vol_index=0,
+    config="b02b0.cnf",
+    interp_method="jac",
+    skip_existing=True,
+    confirm=True,
+):
+    """Entry point shared by the command line and the preprocessing notebooks.
+    Resolves raw Bruker inputs (converted once, reused on later calls), auto-
+    detects the phase-encoding axis/sign where possible (pe_axis/main_sign
+    left as None), shows the parameters and asks for confirmation before
+    topup/applytopup run. Scans that are already corrected are reused when
+    skip_existing is set, and nothing is asked if there is nothing to compute.
+    Returns the list of corrected files, in the order of epi_files."""
+    out_dir = Path(out_dir)
+    # Resolving raw inputs first is a no-op for the later calls inside
+    # distortion_correct_multiple_epis()/distortion_correct_epi(), so the
+    # scans are not converted twice.
+    conversion_dir = out_dir / "converted_raw"
+    epi_was_raw_flags = [is_bruker_raw_scan_dir(entry) for entry in epi_files]
+    epi_files = [str(resolve_scan_input(entry, conversion_dir)) for entry in epi_files]
+    rev_pe_file = str(resolve_scan_input(rev_pe_file, conversion_dir))
+
+    used_names = set()
+    pending = [
+        entry for entry in epi_files
+        if not (skip_existing and (out_dir / _epi_output_subdir_name(entry, used_names)
+                                   / "epi_distortion_corrected.nii.gz").is_file())
+    ]
+
+    # Auto-detection only needs to run once - use the first raw-Bruker --epi
+    # entry that yields a usable detection result.
+    detected_axis, detected_sign, bids_pe_value = (None, None, None)
+    for entry, was_raw in zip(epi_files, epi_was_raw_flags):
+        if was_raw:
+            detected_axis, detected_sign, bids_pe_value = load_detected_pe_direction(entry)
+            if detected_axis is not None:
+                break
+
+    if pe_axis is None:
+        pe_axis = detected_axis if detected_axis is not None else "y"
+    if main_sign is None:
+        main_sign = detected_sign if detected_sign is not None else 1
+
+    if pending and confirm:
+        print_header("Please confirm the phase-encoding parameters", bcolors.HEADER)
+        if detected_axis is not None:
+            print_statement(
+                f"Auto-detected from raw Bruker BIDS metadata (PhaseEncodingDirection={bids_pe_value!r}): "
+                f"axis='{detected_axis}', candidate sign={detected_sign:+d}.",
+                bcolors.NOTIFICATION,
+            )
+            print_statement(
+                "NOTE: the axis is derived reliably from the scanner header, but the blip POLARITY (sign) is "
+                "NOT reliably encoded in standard Bruker metadata - the sign above is only a best-effort default.",
+                bcolors.NOTIFICATION,
+            )
+        else:
+            print_statement(
+                "Automatic phase-encoding detection was not available (requires a raw Bruker --epi scan with "
+                "readable BIDS metadata) - using manually specified / default values.",
+                bcolors.NOTIFICATION,
+            )
+        print_statement(f"  --pe_axis        = {pe_axis}", bcolors.OKBLUE)
+        print_statement(f"  --main_blip_sign = {main_sign}", bcolors.OKBLUE)
+        print_statement(f"  --readout_time   = {readout_time}", bcolors.OKBLUE)
+        print_statement(
+            f"These parameters will be applied identically to all {len(pending)} --epi scan(s) being corrected "
+            f"against the shared --rev_pe_epi.",
+            bcolors.OKBLUE,
+        )
+        print_statement(
+            "Getting these wrong will not crash the pipeline but will make the distortion WORSE, not better - "
+            "always visually check the corrected output against the original in fsleyes.",
+            bcolors.NOTIFICATION,
+        )
+        confirmation = input("Proceed with these phase-encoding parameters? [y/N]: ").strip().lower()
+        if confirmation not in ("y", "yes"):
+            raise SystemExit(
+                "Aborted by user - re-run with the correct --pe_axis / --main_blip_sign (or fix the raw scan "
+                "input) and try again."
+            )
+
+    return distortion_correct_multiple_epis(
+        epi_files,
+        rev_pe_file,
+        out_dir,
+        pe_axis=pe_axis,
+        main_sign=main_sign,
+        readout_time=readout_time,
+        epi_vol_index=epi_vol_index,
+        rev_vol_index=rev_vol_index,
+        config=config,
+        interp_method=interp_method,
+        skip_existing=skip_existing,
+    )
 
 
 if __name__ == "__main__":
@@ -951,70 +1083,7 @@ if __name__ == "__main__":
             raise ValueError("No output directory selected. Please run the script again and choose one.")
         print_statement(f"Selected output directory: {args.out_dir}", bcolors.OKBLUE)
 
-    # Resolve raw Bruker inputs (if any) up front so we can attempt automatic
-    # phase-encoding direction detection and get user confirmation before
-    # topup/applytopup actually run. distortion_correct_multiple_epis()/
-    # distortion_correct_epi() call resolve_scan_input() again on their
-    # inputs, which is a no-op once they are already NIfTI files, so this
-    # does not trigger a second conversion.
-    conversion_dir = Path(args.out_dir) / "converted_raw"
-    epi_was_raw_flags = [is_bruker_raw_scan_dir(entry) for entry in args.epi]
-    args.epi = [str(resolve_scan_input(entry, conversion_dir)) for entry in args.epi]
-    args.rev_pe_epi = str(resolve_scan_input(args.rev_pe_epi, conversion_dir))
-
-    # Auto-detection only needs to run once - use the first raw-Bruker --epi
-    # entry that yields a usable detection result.
-    detected_axis, detected_sign, bids_pe_value = (None, None, None)
-    for entry, was_raw in zip(args.epi, epi_was_raw_flags):
-        if was_raw:
-            detected_axis, detected_sign, bids_pe_value = load_detected_pe_direction(entry)
-            if detected_axis is not None:
-                break
-
-    if args.pe_axis is None:
-        args.pe_axis = detected_axis if detected_axis is not None else "y"
-    if args.main_blip_sign is None:
-        args.main_blip_sign = detected_sign if detected_sign is not None else 1
-
-    print_header("Please confirm the phase-encoding parameters", bcolors.HEADER)
-    if detected_axis is not None:
-        print_statement(
-            f"Auto-detected from raw Bruker BIDS metadata (PhaseEncodingDirection={bids_pe_value!r}): "
-            f"axis='{detected_axis}', candidate sign={detected_sign:+d}.",
-            bcolors.NOTIFICATION,
-        )
-        print_statement(
-            "NOTE: the axis is derived reliably from the scanner header, but the blip POLARITY (sign) is "
-            "NOT reliably encoded in standard Bruker metadata - the sign above is only a best-effort default.",
-            bcolors.NOTIFICATION,
-        )
-    else:
-        print_statement(
-            "Automatic phase-encoding detection was not available (requires a raw Bruker --epi scan with "
-            "readable BIDS metadata) - using manually specified / default values.",
-            bcolors.NOTIFICATION,
-        )
-    print_statement(f"  --pe_axis        = {args.pe_axis}", bcolors.OKBLUE)
-    print_statement(f"  --main_blip_sign = {args.main_blip_sign}", bcolors.OKBLUE)
-    print_statement(f"  --readout_time   = {args.readout_time}", bcolors.OKBLUE)
-    print_statement(
-        f"These parameters will be applied identically to all {len(args.epi)} --epi scan(s) being corrected "
-        f"against the shared --rev_pe_epi.",
-        bcolors.OKBLUE,
-    )
-    print_statement(
-        "Getting these wrong will not crash the pipeline but will make the distortion WORSE, not better - "
-        "always visually check the corrected output against the original in fsleyes.",
-        bcolors.NOTIFICATION,
-    )
-    confirmation = input("Proceed with these phase-encoding parameters? [y/N]: ").strip().lower()
-    if confirmation not in ("y", "yes"):
-        raise SystemExit(
-            "Aborted by user - re-run with the correct --pe_axis / --main_blip_sign (or fix the raw scan "
-            "input) and try again."
-        )
-
-    distortion_correct_multiple_epis(
+    run_with_confirmation(
         args.epi,
         args.rev_pe_epi,
         args.out_dir,
@@ -1025,4 +1094,5 @@ if __name__ == "__main__":
         rev_vol_index=args.rev_vol_index,
         config=args.config,
         interp_method=args.interp_method,
+        skip_existing=False,
     )

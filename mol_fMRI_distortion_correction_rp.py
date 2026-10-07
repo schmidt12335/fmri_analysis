@@ -933,6 +933,7 @@ def run_with_confirmation(
     interp_method="jac",
     skip_existing=True,
     confirm=True,
+    detect_from=None,
 ):
     """Entry point shared by the command line and the preprocessing notebooks.
     Resolves raw Bruker inputs (converted once, reused on later calls), auto-
@@ -940,6 +941,9 @@ def run_with_confirmation(
     left as None), shows the parameters and asks for confirmation before
     topup/applytopup run. Scans that are already corrected are reused when
     skip_existing is set, and nothing is asked if there is nothing to compute.
+    If epi_files are NIfTI files (e.g. an already stitched series) there is no
+    scanner metadata to detect the phase-encoding axis from; detect_from can
+    then name a raw Bruker scan folder acquired with the same protocol.
     Returns the list of corrected files, in the order of epi_files."""
     out_dir = Path(out_dir)
     # Resolving raw inputs first is a no-op for the later calls inside
@@ -965,6 +969,9 @@ def run_with_confirmation(
             detected_axis, detected_sign, bids_pe_value = load_detected_pe_direction(entry)
             if detected_axis is not None:
                 break
+    if detected_axis is None and detect_from is not None and is_bruker_raw_scan_dir(detect_from):
+        detected_axis, detected_sign, bids_pe_value = load_detected_pe_direction(
+            resolve_scan_input(detect_from, conversion_dir))
 
     if pe_axis is None:
         pe_axis = detected_axis if detected_axis is not None else "y"

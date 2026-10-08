@@ -409,3 +409,52 @@ def mean_image(input_file, output_file):
     mean.run()
     print_statement(f"[OK] Mean image saved -> {output_file}", bcolors.OKGREEN)
     return output_file
+
+
+def drop_first_volumes(in_file, n_drop, out_file):
+    """Writes in_file without its first n_drop volumes (the signal of a new scan is not yet in steady state)."""
+    n_total = n_volumes(in_file)
+    if n_drop >= n_total:
+        raise ValueError(f"Cannot drop {n_drop} volumes from {in_file}, which has only {n_total}.")
+    subprocess.run(["fslroi", str(in_file), str(out_file), str(n_drop), "-1"], check=True)
+    print_statement(f"[OK] Dropped the first {n_drop} volumes -> {out_file}", bcolors.OKGREEN)
+    return out_file
+
+
+def normalise_scan_levels(func_file, mask_file, scan_ranges, anchor_vol, out_file, factors_csv, edge_vols=30):
+    """Scales every scan of the stitched series so that its signal level continues the neighbouring scan.
+    The brain-mean level of the last edge_vols volumes of a scan is matched to the first edge_vols volumes of
+    the next one, starting from the scan that contains anchor_vol (factor 1). Only whole-scan factors are used,
+    so the changes within a scan are left alone. Real differences between scans (e.g. a lasting change after the
+    stimulation) are removed as well. The factors are stored in factors_csv."""
+    img = nib.load(str(func_file))
+    data = img.get_fdata(dtype=np.float32)
+    brain = nib.load(str(mask_file)).get_fdata() > 0
+    ts = data[brain].mean(axis=0)
+
+    n = len(scan_ranges)
+    anchor = next(k for k, (_, start, end) in enumerate(scan_ranges) if start <= anchor_vol <= end)
+    edge = [min(edge_vols, (end - start + 1) // 2) for _, start, end in scan_ranges]
+    first = [ts[start:start + edge[k]].mean() for k, (_, start, _) in enumerate(scan_ranges)]
+    last = [ts[end + 1 - edge[k]:end + 1].mean() for k, (_, _, end) in enumerate(scan_ranges)]
+    factors = [1.0] * n
+    for k in range(anchor + 1, n):
+        factors[k] = last[k - 1] * factors[k - 1] / first[k]
+    for k in range(anchor - 1, -1, -1):
+        factors[k] = first[k + 1] * factors[k + 1] / last[k]
+
+    per_volume = np.ones(data.shape[-1], dtype=np.float32)
+    for f, (_, start, end) in zip(factors, scan_ranges):
+        per_volume[start:end + 1] = f
+    header = img.header.copy()
+    header.set_data_dtype(np.float32)
+    nib.save(nib.Nifti1Image(data * per_volume, img.affine, header), str(out_file))
+
+    table = pd.DataFrame({"scan": [s for s, _, _ in scan_ranges], "start_volume": [s for _, s, _ in scan_ranges],
+                          "end_volume": [e for _, _, e in scan_ranges], "factor": factors,
+                          "level_first_vols": first, "level_last_vols": last, "anchor": [k == anchor for k in range(n)]})
+    table.to_csv(factors_csv, index=False)
+    print_header("Scan level normalisation (factor applied to each scan)", bcolors.HEADER)
+    print(table.to_string(index=False))
+    print_statement(f"[OK] Normalised series -> {out_file}, factors -> {factors_csv}", bcolors.OKGREEN)
+    return factors

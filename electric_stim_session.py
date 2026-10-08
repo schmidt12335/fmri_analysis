@@ -71,6 +71,7 @@ def infer_session(analysis_dir):
         "analysed_func_dir": analysed_func_dir,
         "analysed_struct_dir": analysed_struct_dir,
         "analysis_dir": analysis_dir,
+        "drop_vols": int(drop.group(1)) if (drop := re.search(r"_drop(\d+)", analysed_func_dir.name)) else 0,
         "mask_file": str(analysed_func_dir / "mask_mean_mc_func.nii.gz"),
         "structural_file_for_coregistration": str(struct_file),
     }

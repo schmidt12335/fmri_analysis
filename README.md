@@ -188,6 +188,6 @@ The notebooks find the shared data folder (the one containing `RawData`, `Analys
 
 1. the environment variable `FMRI_ROOT`
 2. the folder saved in `fmri_root.txt` in the repository folder (ignored by git)
-3. otherwise the notebook asks for the folder (type or paste the path) and saves it in `fmri_root.txt`
+3. otherwise a folder selection popup opens and saves it in `fmri_root.txt`
 
 So you are asked once per machine. Delete `fmri_root.txt` to choose another folder.

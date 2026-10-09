@@ -206,3 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 ._*
+
+# Machine specific data root (see fmri_paths.py)
+fmri_root.txt

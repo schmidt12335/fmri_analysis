@@ -181,3 +181,13 @@ python FAP_group_analysis.py \
 ```
 
 If you omit `--group-root`, the script will open a popup folder selection dialog so you can choose the subject data folder interactively.
+
+# Data folder location
+
+The notebooks find the shared data folder (the one containing `RawData`, `AnalysedData` and `atlas`) via `fmri_paths.py`, in this order:
+
+1. the environment variable `FMRI_ROOT`
+2. the folder saved in `fmri_root.txt` in the repository folder (ignored by git)
+3. otherwise the notebook asks for the folder (type or paste the path) and saves it in `fmri_root.txt`
+
+So you are asked once per machine. Delete `fmri_root.txt` to choose another folder.

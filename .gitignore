@@ -209,3 +209,6 @@ __marimo__/
 
 # Machine specific data root (see fmri_paths.py)
 fmri_root.txt
+
+# Last entries of the plot_slice_stack.py form
+plot_slice_stack_last.json

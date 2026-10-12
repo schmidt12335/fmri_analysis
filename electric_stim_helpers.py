@@ -242,22 +242,32 @@ def func_param_extract(scan_dir, export_env=True):
                 os.environ[k] = str(v)
 
     return params
+def _bruker_value_after(path, key):
+    """Value on the line after `key` in a Bruker parameter file (text between < >), or None."""
+    lines = Path(path).read_text(errors="ignore").splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith(key) and i + 1 < len(lines):
+            return lines[i + 1].strip().strip("<>")
+    return None
+
+
 def extract_subject_id(scan_dir):
     subject_file = Path(scan_dir) / "subject"
 
-    if not subject_file.exists():
-        raise FileNotFoundError(f"'subject' file not found in {scan_dir}")
+    if subject_file.exists():
+        value = _bruker_value_after(subject_file, "##$SUBJECT_id")
+        if value is None:
+            raise ValueError("##$SUBJECT_id not found in subject file")
+        return value
 
-    with subject_file.open("r") as f:
-        lines = f.readlines()
+    # Incomplete copies of a study can lack the 'subject' file; every scan stores the same ID in its visu_pars
+    for visu_pars in sorted(Path(scan_dir).glob("*/pdata/1/visu_pars")):
+        value = _bruker_value_after(visu_pars, "##$VisuSubjectId")
+        if value:
+            print_statement(f"'subject' file not found in {scan_dir}; subject ID read from {visu_pars.relative_to(scan_dir)}", bcolors.NOTIFICATION)
+            return value
 
-    for i, line in enumerate(lines):
-        if line.strip().startswith("##$SUBJECT_id"):
-            # The value is expected on the next line
-            value_line = lines[i + 1].strip()
-            return value_line.strip("<>")
-
-    raise ValueError("##$SUBJECT_id not found in subject file")
+    raise FileNotFoundError(f"'subject' file not found in {scan_dir}, and no scan contains a VisuSubjectId")
 def print_header(message, color):
     line = "*" * 134   # same width everywhere
     width = len(line)

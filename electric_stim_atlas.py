@@ -1,7 +1,8 @@
 """Atlas registration helpers for the electrical stimulation analysis notebooks.
 
-Follows roi_atlas_analysis.py: the structural scan is registered to the functional mean (struct2func, rigid) and to the
-atlas template (struct2atlas). The two matrices are composed into one functional -> atlas matrix, and the multi-label
+Follows roi_atlas_analysis.py: the cleaned structural scan is registered to the brain-masked functional mean (struct2func,
+rigid, bounded like the coregistration of mol_fMRI_v5.6) and to the atlas template (struct2atlas). The two matrices are
+composed into one functional -> atlas matrix, and the multi-label
 atlas is resampled once onto the functional grid with nearest-neighbour interpolation, so the functional data itself is
 never interpolated. Finished registrations in atlas_dir are reused.
 """
@@ -61,7 +62,7 @@ def prepare_registration_template(atlas_template, atlas_mask, reg_voxel_mm, atla
     return template
 
 
-def register(source, base, prefix, cost, cmass, warp, atlas_dir):
+def register(source, base, prefix, cost, cmass, warp, atlas_dir, extra_args=()):
     matrix = Path(atlas_dir) / f"{prefix}.aff12.1D"
     aligned = Path(atlas_dir) / f"{prefix}_aligned.nii.gz"
     if matrix.exists() and aligned.exists():
@@ -69,7 +70,7 @@ def register(source, base, prefix, cost, cmass, warp, atlas_dir):
         return matrix
     cmd = ["3dAllineate", "-source", source, "-base", base, "-prefix", aligned, "-1Dmatrix_save", matrix,
            "-1Dparam_save", Path(atlas_dir) / f"{prefix}_params.1D", "-warp", warp, "-cost", cost,
-           "-source_automask+2", "-twopass", "-twobest", "MAX", "-float", "-verb", "-overwrite"]
+           "-source_automask+2", "-twopass", "-twobest", "MAX", "-float", "-verb", "-overwrite", *extra_args]
     if cmass:
         cmd.append(f"-cmass{cmass}")
     run_afni(cmd)
@@ -85,11 +86,24 @@ def aff12_to_matvec(matrix, out):
     return out
 
 
-def register_to_atlas(struct_file, func_reference, atlas_dir, species_cfg, atlas_template, atlas_labels, atlas_mask=""):
+STRUCT2FUNC_LIMITS = ("-maxrot", "5", "-maxshf", "2")  # same bounds as the coregistration of mol_fMRI_v5.6
+
+
+def struct2func_matrix(struct_file, func_reference, brain_mask, atlas_dir):
+    """Registers the cleaned structural scan to the brain-masked functional mean (rigid, bounded like mol_fMRI_v5.6).
+    Cached under its own name, so results of the earlier unmasked registration (`struct2func*`) are not reused."""
+    atlas_dir = Path(atlas_dir)
+    masked = atlas_dir / "mean_mc_func_masked.nii.gz"
+    if not masked.exists() or masked.stat().st_mtime < max(Path(func_reference).stat().st_mtime, Path(brain_mask).stat().st_mtime):
+        run_afni(["3dcalc", "-a", func_reference, "-b", brain_mask, "-expr", "a*step(b)", "-prefix", masked, "-overwrite"])
+    return register(struct_file, masked, "struct2func_masked", "nmi", None, "shift_rotate", atlas_dir, STRUCT2FUNC_LIMITS)
+
+
+def register_to_atlas(struct_file, func_reference, brain_mask, atlas_dir, species_cfg, atlas_template, atlas_labels, atlas_mask=""):
     """Registers structural -> functional and structural -> atlas, composes the functional -> atlas matrix and
     resamples the atlas labels onto the functional grid. Returns (composite matrix, labels in functional space)."""
     atlas_dir = Path(atlas_dir)
-    struct2func = register(struct_file, func_reference, "struct2func", "nmi", None, "shift_rotate", atlas_dir)
+    struct2func = struct2func_matrix(struct_file, func_reference, brain_mask, atlas_dir)
     struct2atlas = register(struct_file, prepare_registration_template(atlas_template, atlas_mask, species_cfg["reg_voxel_mm"], atlas_dir),
                             "struct2atlas", species_cfg["cost"], "+xz", species_cfg["warp"], atlas_dir)  # +xz suits a coronal slab with limited A-P coverage
 

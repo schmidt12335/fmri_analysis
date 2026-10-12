@@ -35,6 +35,16 @@ def read_scan_ranges(analysed_func_dir):
         return [(int(r["scan"]), int(r["start_volume"]), int(r["end_volume"])) for r in csv.DictReader(f)]
 
 
+def cleaned_structural_file(analysed_struct_dir):
+    """The brain-masked structural scan used for every registration; there is no fallback to the uncleaned scan."""
+    cleaned = Path(analysed_struct_dir) / "cleaned_struct.nii.gz"
+    if not cleaned.exists():
+        raise FileNotFoundError(
+            f"{cleaned} not found. The registration needs the cleaned (brain-masked) structural scan: run the "
+            "structural masking step of the preprocessing notebook (mask_struct.nii.gz -> cleaned_struct.nii.gz).")
+    return cleaned
+
+
 def infer_session(analysis_dir):
     """Rebuild the session of a folder that was created before session.json existed."""
     analysis_dir = Path(analysis_dir)
@@ -52,8 +62,7 @@ def infer_session(analysis_dir):
     if not candidates:
         raise FileNotFoundError(f"No processed structural folder (with struct.nii.gz) found in {subject_dir}.")
     analysed_struct_dir = candidates[0]
-    struct_file = analysed_struct_dir / ("cleaned_struct.nii.gz" if (analysed_struct_dir / "cleaned_struct.nii.gz").exists()
-                                         else "struct.nii.gz")
+    struct_file = cleaned_structural_file(analysed_struct_dir)
 
     parts = list(subject_dir.parts)
     if "AnalysedData" not in parts:
@@ -103,6 +112,8 @@ def load_session(analysis_dir):
         for key in PATH_KEYS:
             if key in session:
                 session[key] = Path(session[key])
+        # sessions saved without masking stored the uncleaned scan; the cleaned one is always required
+        session["structural_file_for_coregistration"] = str(cleaned_structural_file(session["analysed_struct_dir"]))
         return session, str(path)
     return infer_session(analysis_dir), "inferred from folder layout"
 

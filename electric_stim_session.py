@@ -35,13 +35,23 @@ def read_scan_ranges(analysed_func_dir):
         return [(int(r["scan"]), int(r["start_volume"]), int(r["end_volume"])) for r in csv.DictReader(f)]
 
 
+def structural_mask_file(analysed_struct_dir):
+    """The hand-drawn brain mask of the structural scan: struct_mask.nii.gz (the name fsleyes proposes);
+    analyses from before the rename have mask_struct.nii.gz, which is still found."""
+    folder = Path(analysed_struct_dir)
+    for name in ("struct_mask.nii.gz", "mask_struct.nii.gz"):
+        if (folder / name).exists():
+            return folder / name
+    return folder / "struct_mask.nii.gz"
+
+
 def cleaned_structural_file(analysed_struct_dir):
     """The brain-masked structural scan used for every registration; there is no fallback to the uncleaned scan."""
     cleaned = Path(analysed_struct_dir) / "cleaned_struct.nii.gz"
     if not cleaned.exists():
         raise FileNotFoundError(
             f"{cleaned} not found. The registration needs the cleaned (brain-masked) structural scan: run the "
-            "structural masking step of the preprocessing notebook (mask_struct.nii.gz -> cleaned_struct.nii.gz).")
+            "structural masking step of the preprocessing notebook (struct_mask.nii.gz -> cleaned_struct.nii.gz).")
     return cleaned
 
 

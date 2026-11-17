@@ -6,6 +6,8 @@ authors:
   - family-names: Schmidt
     given-names: Pascal
     affiliation: "MPI for biological cybernetics"
+  - family-names: Jain
+    given-names: Naman
 license: MIT
 repository-code: "https://github.com/schmidt12335/fmri_analysis"
 version: "5.7"

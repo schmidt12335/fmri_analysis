@@ -1,195 +1,95 @@
-Setting up script for Data Analysis
+# Molecular fMRI data analysis
 
-Current pipeline notebook: `mol_fMRI_v5.7.ipynb` (EPI and SORDINO). See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
+Jupyter notebooks and Python scripts to preprocess Bruker (ParaVision) functional MRI data of rodents, compute percent signal change (PSC) maps, extract ROI and atlas-region time courses, and analyse stimulation experiments. Both EPI and SORDINO (zero echo time) data are supported.
 
-# Prerequisites
+Version history: [CHANGELOG.md](CHANGELOG.md).
 
-## Make sure you have the following installed:
+## Which notebook do I use?
 
-* Python (3.8 or newer)
-* Visual Studio Code
-* pip (comes with Python)
+| Experiment | Notebook(s) | Description |
+|---|---|---|
+| Injection of vasoactive peptides or sensor ligands (EPI or SORDINO) | `mol_fMRI_v5.7.ipynb` | [Injection analysis](#injection-analysis-mol_fmri_v57) below |
+| Electrical stimulation, EPI | `mol_fMRI_electric_stim_preprocessing.ipynb`, then `..._analysis.ipynb` and/or `..._poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
+| Electrical stimulation, SORDINO | `mol_fMRI_sordino_preprocessing.ipynb`, then `mol_fMRI_sordino_analysis.ipynb` and/or `mol_fMRI_sordino_poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 
-## To check Python installation:
+The other `mol_fMRI_*.ipynb` notebooks (v2 to v5.6, v6, `mol_fMRI.ipynb`, `mol_fMRI_elstim_old.ipynb`) are earlier versions and are kept for reference only.
 
-* python --version
-or
-* python3 --version
+## Setup
 
-# Follow the step to run Jupyter notebook in VSC
-## Step 1: Install Required VS Code Extensions
+### Requirements
 
-* Open VS Code → Extensions (Ctrl+Shift+X) and install:
-	* Python (by Microsoft)
-	* Jupyter (by Microsoft)
+- Python 3.9 or newer, [Visual Studio Code](https://code.visualstudio.com/) with the *Python* and *Jupyter* extensions
+- [FSL](https://fsl.fmrib.ox.ac.uk/) (including `fsleyes`) and [AFNI](https://afni.nimh.nih.gov/), installed separately and available on the `PATH` (nipype only provides Python interfaces to them)
+- The Python packages of [requirements.txt](requirements.txt)
 
-Restart VS Code after installation.
+### Python environment
 
-## Step 2: Select Your Installed Python Interpreter
+```bash
+python3 -m venv .venv                  # or: conda create -n fmri python=3.11
+source .venv/bin/activate              # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+pip install ipykernel
+```
 
-* Open VS Code
-* Press Ctrl+Shift+P (macOS: Cmd+Shift+P)
-* Search and select:
-	* Python: Select Interpreter
-* Choose your installed Python (example):
-	* /usr/bin/python3
-	* ~/miniforge3/bin/python
-	* C:\Python311\python.exe
+`brkraw` has to be version 0.3.11 (newer versions no longer have `brkraw tonii`). If the install above pulls in a wrong version, run:
 
-✔ This Python will be used by Jupyter.
-
-## Step 3: Install Jupyter in That Python Environment
-
-* Open VS Code Terminal:
-* Click on Terminal → New Terminal
-* Run:
-	* pip install jupyter notebook ipykernel
-* In terminal verify:
-	* jupyter --version
-
-## Step 4: Open or Create a Jupyter Notebook
-* Option A: Open Existing Notebook
-	* code example.ipynb
-* Option B: Create New Notebook
-	* In VS Code → File → New File
-	* Save as: my_notebook.ipynb
-
-VS Code will automatically open it in Jupyter mode.
-
-## Step 5: Select Python Kernel for Notebook
-
-* Open the .ipynb file
-* Click Kernel Selector (top-right)
-* Choose:
-	* Python (your-selected-interpreter)
-	- for example: Python 3.11 (miniforge)
-
-✔ Your notebook is now linked to your installed Python.
-
-## Step 6: Run Notebook Cells
-
-* Run single cell: Shift + Enter
-* Run all cells: Run → Run All
-* Restart kernel: Kernel → Restart Kernel
-
-## Step 7: Test Installation
-
-* Run this in a notebook cell:
-	- import sys
-	- print(sys.executable)
-
-Output should match your selected Python path.
-
-
-# Installing python dependencies to run script
-
-All the that are needed to run the data analysis script have been listed out in the 
-requirements file. To install these dependencies, run the following command: 
-
- - conda install -r requirements.txt
-
-brkraw can not be installed with conda, therefore install it with pip as shown below. Also, there is no version 0.4.0 currently, so i used 0.3.11. Newer versions do not seem to have brkraw tonii (probably different name).
-
+```bash
 pip uninstall brkraw
-pip install --no-deps brkraw==0.3.11 
-
-⚠️ Please note that AFNI and FSL must be installed separately and available in your system PATH.
-Nipype only provides Python interfaces to these tools.
-
-## Popup-driven filtering and decomposition workflow
-
-`filtering_decomposition_v24.py` is the Python version of the BLuSH filtering,
-QC, SCM, and decomposition workflow. It no longer requires
-`cleaned_mc_func.nii.gz` or the mask to be in the current directory. Start it
-from VS Code or a terminal:
-
-```bash
-python filtering_decomposition_v24.py
+pip install --no-deps brkraw==0.3.11
 ```
 
-The script opens dialogs for the cleaned functional NIfTI, an optional mask,
-and the output folder. Numeric settings are requested in popup dialogs, and
-the component plots remain interactive: click components to drop them and
-press Enter to save the selected decomposition.
+### Running a notebook in VS Code
 
+1. Open the `.ipynb` file in VS Code.
+2. Click the kernel selector (top right) and choose the Python environment from above. To check: run `import sys; print(sys.executable)` in a cell; the output must be that environment's Python.
+3. Run cells with `Shift+Enter`, or everything with *Run All*. Restart the kernel from the toolbar.
 
+### Data folder
 
-## PS Group Analysis Script - 28.05.26
-
-
-The repository includes a group-level analysis script for averaging subject-level percent signal change data:
-
-- `FAP_group_analysis.py`
-
-## What it does
-
-- Averages subject-level percent signal change NIfTI maps into a single group map
-- Averages ROI percent signal change time series across subjects
-- Saves a group-average map, a CSV of ROI time series, and an optional plot
-
-## Expected folder structure
-
-Each subject should be stored in its own folder under a shared group directory. Example:
-
-```
-/group_data/
-  subject01/
-    subject01_scm.nii.gz
-    PSC_time_series_roi_example.txt
-  subject02/
-    subject02_scm.nii.gz
-    PSC_time_series_roi_example.txt
-  ...
-```
-
-Match subject-level filenames using glob patterns in the script arguments.
-
-## Example usage
-
-Average PSC maps and ROI time series together:
-
-```bash
-python FAP_group_analysis.py \
-  --group-root /path/to/group_data \
-  --map-pattern "*scm*.nii.gz" \
-  --map-output group_average_signal_change_map.nii.gz \
-  --roi-pattern "PSC_time_series_*.txt" \
-  --roi-output group_average_roi_timeseries.csv \
-  --roi-plot group_average_roi_timeseries.png
-```
-
-Only average PSC maps:
-
-```bash
-python FAP_group_analysis.py --group-root /path/to/group_data --map-output group_average_signal_change_map.nii.gz --no-roi
-```
-
-Only average ROI time series:
-
-```bash
-python FAP_group_analysis.py --group-root /path/to/group_data --roi-output group_average_roi_timeseries.csv --no-map
-```
-
-Register each subject to a common atlas before averaging PSC maps:
-
-```bash
-python FAP_group_analysis.py \
-  --group-root /path/to/group_data \
-  --map-pattern "*scm*.nii.gz" \
-  --atlas-reference /path/to/atlas_template.nii.gz \
-  --struct-pattern "*struct*.nii.gz" \
-  --atlas-cache-dir /path/to/group_data/atlas_registered_maps \
-  --map-output group_average_signal_change_map_atlas.nii.gz
-```
-
-If you omit `--group-root`, the script will open a popup folder selection dialog so you can choose the subject data folder interactively.
-
-# Data folder location
-
-The notebooks find the shared data folder (the one containing `RawData`, `AnalysedData` and `atlas`) via `fmri_paths.py`, in this order:
+The notebooks find the shared data folder (the one containing `RawData`, `AnalysedData` and `atlas`) through `fmri_paths.py`, in this order:
 
 1. the environment variable `FMRI_ROOT`
 2. the folder saved in `fmri_root.txt` in the repository folder (ignored by git)
-3. otherwise a folder selection popup opens and saves it in `fmri_root.txt`
+3. otherwise a folder selection popup opens and saves the choice in `fmri_root.txt`
 
 So you are asked once per machine. Delete `fmri_root.txt` to choose another folder.
+
+Raw data is read from `RawData/<...>/<session>/<scan number>/` (the Bruker scan folders). Results are written to `AnalysedData/<...>/<subject ID>/`, i.e. next to the session's position in the tree with `RawData` replaced by `AnalysedData`; the subject ID is read from the `subject` file of the session.
+
+## Injection analysis (`mol_fMRI_v5.7`)
+
+Standard analysis of an injection experiment (vasoactive peptides or sensor ligands): the signal after the injection is compared with a baseline to give a percent signal change map, plus time courses in hand-drawn or automatic ROIs. One functional scan and one structural scan are processed per run.
+
+### Workflow
+
+1. **Run the function-library cell and the step-selection cell.** Tick the steps to run: Bruker → NIfTI, Distortion correction (EPI only, off by default), Motion correction, Spatial smoothing, Masking. Existing results are never overwritten without asking (`OVERWRITE_POLICY`).
+2. **Choose the raw data folder** (the session folder under `RawData`), enter the functional and structural scan numbers and the window size, in **volumes**. The sequence is detected from the scan's `method` file; the *Sequence* dropdown (auto / EPI / SORDINO) overrides it, and you are asked if it cannot be detected. A sordino volume spans more time than an EPI volume (e.g. 2.4 s), so adjust the windows.
+3. **Convert and motion-correct** the functional scan (`func.nii.gz`, `mc_func.nii.gz`, `motion.1D`). For sordino the real volume TR is written into the NIfTI header. Distortion correction needs a reverse phase-encoded scan and is only possible for EPI.
+4. **Draw the masks** in fsleyes when requested, in the functional analysis folder: `mask_mean_mc_func.nii.gz` (brain without the cannulas, drawn on `middle_vol.nii.gz`) and `mask_mean_mc_func_cannulas.nii.gz` (brain including the cannulas).
+5. **Select the start volumes** of the baseline and the signal window. The notebook smooths the data inside the brain mask and computes the PSC map and PSC time series (`scm_from_sm_*.nii.gz`, `scm_timeseries_from_sm_*.nii.gz`), an exclusion mask for unreliable voxels (brain edge, low baseline, low tSNR) and a despeckled version.
+6. **Structural scan:** converted, masked (`struct_mask.nii.gz`), and the functional mean is coregistered to it (rigid body; for EPI with a bounded scaling along the phase-encoding axis). A quality check writes `coregistration_qc.png` and `coregistration_qc.txt`. The PSC maps are saved in structural space (`signal_change_map_coregistered_structural_space.nii.gz` and masked versions).
+7. **ROIs and time courses.** Either draw the ROIs in fsleyes, or use the optional automatic ROIs (strongest 3×3 voxel block inside the striatum of the SIGMA rat atlas, per side). ROI files are named `roi_{protein/aav}_{direct|aav}_{analyte}_{left|right}.nii.gz`. For each ROI the notebook saves the PSC time course (`PSC_time_series_<roi>.txt`) and a plot.
+8. **Optional diagnostics** at the end (`exclusion_diagnostics`) show which exclusion rule removes which voxels, and how much of each ROI is lost. They change no map or mask.
+
+### Where the results are
+
+For a functional scan `<n>` with sequence name `<seq>`:
+
+```
+AnalysedData/<...>/<subject ID>/
+  <struct scan><seq>/                  struct.nii.gz, struct_mask.nii.gz, cleaned_struct.nii.gz
+  <n><seq>/                            func.nii.gz, mc_func.nii.gz, motion.1D, masks, middle_vol.nii.gz
+    <timestamp>_<user>/                one folder per run: PSC maps, exclusion masks, coregistration,
+                                       ROIs, PSC time courses and plots
+```
+
+## Other scripts
+
+| Script | Purpose |
+|---|---|
+| `nifti_to_mp4.py` | Movie of the time series of one slice of a 4D NIfTI file |
+| `plot_slice_stack.py` | Signal change maps on an atlas as a stack of slices (figure) |
+| `roi_atlas_analysis.py` | Time courses of every region of a multi-label atlas |
+| `mol_fMRI_distortion_correction_rp.py` | EPI distortion correction (FSL topup), used by the notebooks |
+
+Group-level analysis scripts (`*_group_analysis*.py`, `FC_QC*.py`) are being cleaned up and are not documented yet.

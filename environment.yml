@@ -1,0 +1,10 @@
+name: fmri
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt
+# FSL and AFNI are not installed by this file: install them separately and put them on the PATH (see README).
+# If brkraw pulls in wrong versions, run afterwards: pip uninstall brkraw && pip install --no-deps brkraw==0.3.11

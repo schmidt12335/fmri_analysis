@@ -10,7 +10,7 @@ Two sets of notebooks with the same structure, one per sequence:
 
 Run the preprocessing notebook once per session, then either or both analysis notebooks on its result. The analysis notebooks do not recompute anything of the preprocessing, so they can be started at any time. (`mol_fMRI_elstim_old.ipynb` is the old single-notebook version.)
 
-Helper modules: `electric_stim_helpers.py`, `electric_stim_session.py`, `electric_stim_atlas.py` (EPI and shared), `sordino_helpers.py` (sordino-specific), `mol_fMRI_electric_stim_stitching.py` and `mol_fMRI_sordino_stitching.py` (command-line versions of the stitching step), `roi_atlas_analysis.py` (command-line atlas ROI time courses).
+Helper modules (in the root folder, imported by the notebooks): `electric_stim_helpers.py`, `electric_stim_session.py`, `electric_stim_atlas.py` (EPI and shared), `sordino_helpers.py` (sordino-specific). Command-line scripts in `scripts/`: `mol_fMRI_electric_stim_stitching.py` and `mol_fMRI_sordino_stitching.py` (the stitching step), `roi_atlas_analysis.py` (atlas ROI time courses).
 
 ## 1. Preprocessing
 

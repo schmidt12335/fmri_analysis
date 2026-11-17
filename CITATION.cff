@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+title: "Molecular fMRI data analysis"
+type: software
+authors:
+  - family-names: Schmidt
+    given-names: Pascal
+    affiliation: "MPI for biological cybernetics"
+license: MIT
+repository-code: "https://github.com/schmidt12335/fmri_analysis"
+version: "5.7"
+keywords:
+  - fMRI
+  - Bruker
+  - rodent
+  - SORDINO
+  - EPI
+  - percent signal change

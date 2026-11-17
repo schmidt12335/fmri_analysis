@@ -4,6 +4,16 @@ Jupyter notebooks and Python scripts to preprocess Bruker (ParaVision) functiona
 
 Version history: [CHANGELOG.md](CHANGELOG.md).
 
+```mermaid
+flowchart LR
+    A["Bruker raw data<br/>(EPI or SORDINO)"] --> B["NIfTI conversion<br/>(+ distortion correction, EPI only)"]
+    B --> C["Motion correction<br/>+ brain mask"]
+    C --> D["Percent signal change<br/>maps and time courses"]
+    D --> E["Coregistration to the<br/>structural scan"]
+    D --> F["ROI and atlas-region<br/>time courses"]
+    E --> G["Maps in structural<br/>or atlas space"]
+```
+
 ## Which notebook do I use?
 
 | Experiment | Notebook(s) | Description |
@@ -12,7 +22,7 @@ Version history: [CHANGELOG.md](CHANGELOG.md).
 | Electrical stimulation, EPI | `mol_fMRI_electric_stim_preprocessing.ipynb`, then `..._analysis.ipynb` and/or `..._poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 | Electrical stimulation, SORDINO | `mol_fMRI_sordino_preprocessing.ipynb`, then `mol_fMRI_sordino_analysis.ipynb` and/or `mol_fMRI_sordino_poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 
-The other `mol_fMRI_*.ipynb` notebooks (v2 to v5.6, v6, `mol_fMRI.ipynb`, `mol_fMRI_elstim_old.ipynb`) are earlier versions and are kept for reference only.
+The notebooks `mol_fMRI_v5.4` to `v5.6` and `mol_fMRI_elstim_old` are earlier versions that stay in this folder because they use the helper modules next to them. All older, self-contained notebooks are in [archive/](archive). Both are kept for reference only.
 
 ## Setup
 
@@ -24,11 +34,19 @@ The other `mol_fMRI_*.ipynb` notebooks (v2 to v5.6, v6, `mol_fMRI.ipynb`, `mol_f
 
 ### Python environment
 
+With conda (uses [environment.yml](environment.yml)):
+
 ```bash
-python3 -m venv .venv                  # or: conda create -n fmri python=3.11
+conda env create -f environment.yml
+conda activate fmri
+```
+
+Or with a plain virtual environment:
+
+```bash
+python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pip install ipykernel
 ```
 
 `brkraw` has to be version 0.3.11 (newer versions no longer have `brkraw tonii`). If the install above pulls in a wrong version, run:
@@ -87,9 +105,16 @@ AnalysedData/<...>/<subject ID>/
 
 | Script | Purpose |
 |---|---|
-| `nifti_to_mp4.py` | Movie of the time series of one slice of a 4D NIfTI file |
+| `scripts/nifti_to_mp4.py` | Movie of the time series of one slice of a 4D NIfTI file |
 | `plot_slice_stack.py` | Signal change maps on an atlas as a stack of slices (figure) |
-| `roi_atlas_analysis.py` | Time courses of every region of a multi-label atlas |
+| `scripts/roi_atlas_analysis.py` | Time courses of every region of a multi-label atlas |
 | `mol_fMRI_distortion_correction_rp.py` | EPI distortion correction (FSL topup), used by the notebooks |
 
-Group-level analysis scripts (`*_group_analysis*.py`, `FC_QC*.py`) are being cleaned up and are not documented yet.
+Group-level analysis scripts and FC-QC scripts (in [scripts/](scripts)) are being cleaned up and are not documented yet.
+
+## Contributing
+
+- **Notebooks are committed without outputs** (outputs make the repository large and the diffs unreadable). Once per clone, run `nbstripout --install --attributes .gitattributes`; git then strips the outputs on commit, and your local notebook keeps them. To strip notebooks that are already tracked, run `git add --renormalize .` once and commit.
+- **Checks:** `python tools/check_repo.py` checks the syntax of all Python files and notebook cells and that no notebook has outputs. GitHub Actions runs it on every push.
+- **New version of the pipeline:** copy the newest `mol_fMRI_v5.x.ipynb` to a new file, change it, and add a section at the top of [CHANGELOG.md](CHANGELOG.md).
+- To cite this repository, use *Cite this repository* on the GitHub page ([CITATION.cff](CITATION.cff)).

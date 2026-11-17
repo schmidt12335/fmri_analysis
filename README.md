@@ -1,5 +1,7 @@
 Setting up script for Data Analysis
 
+Current pipeline notebook: `mol_fMRI_v5.7.ipynb` (EPI and SORDINO). See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
+
 # Prerequisites
 
 ## Make sure you have the following installed:

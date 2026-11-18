@@ -2,6 +2,13 @@
 
 Changes of the `mol_fMRI` pipeline notebook, newest version first. Each version is a separate notebook (`mol_fMRI_v5.x.ipynb`); older notebooks stay unchanged.
 
+## Unreleased
+
+### Changed (SORDINO stimulation notebooks)
+- `mol_fMRI_sordino_analysis.ipynb`: the stimulation timing that is not stored in the data is entered in a new input cell instead of being fixed in the code: Stimulation ON (required, no default, so a wrong value is never used silently), Stimulation OFF (default: the rest of the trigger block), hemodynamic lag and the OFF window at the end of the block. The trigger blocks read from the method files are shown next to it.
+- `mol_fMRI_sordino_analysis.ipynb`: a trigger block that is at least twice as long as the shortest one (e.g. 500 volumes after ten blocks of 25 volumes) is the post-stimulation phase of the same scan and is no longer counted as an additional epoch. This allows one scan per stimulation with the stimulation blocks and the post-stimulation phase together.
+- `mol_fMRI_sordino_poststim_analysis.ipynb`: if the last scan ends with such a long trigger block, the default baseline window starts at the beginning of the post-stimulation phase and the signal window ends at the end of the scan (the window length is at most half of the phase).
+
 ## v5.7
 
 ### Added

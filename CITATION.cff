@@ -10,7 +10,7 @@ authors:
     given-names: Naman
 license: MIT
 repository-code: "https://github.com/schmidt12335/fmri_analysis"
-version: "5.7"
+version: "5.8"
 keywords:
   - fMRI
   - Bruker

@@ -18,7 +18,7 @@ flowchart LR
 
 | Experiment | Notebook(s) | Description |
 |---|---|---|
-| Injection of vasoactive peptides or sensor ligands (EPI or SORDINO) | `mol_fMRI_v5.7.ipynb` | [Injection analysis](#injection-analysis-mol_fmri_v57) below |
+| Injection of vasoactive peptides or sensor ligands (EPI or SORDINO) | `mol_fMRI_v5.8.ipynb` | [Injection analysis](#injection-analysis-mol_fmri_v58) below |
 | Electrical stimulation, EPI | `mol_fMRI_electric_stim_preprocessing.ipynb`, then `..._analysis.ipynb` and/or `..._poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 | Electrical stimulation, SORDINO | `mol_fMRI_sordino_preprocessing.ipynb`, then `mol_fMRI_sordino_analysis.ipynb` and/or `mol_fMRI_sordino_poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 
@@ -74,7 +74,7 @@ So you are asked once per machine. Delete `fmri_root.txt` to choose another fold
 
 Raw data is read from `RawData/<...>/<session>/<scan number>/` (the Bruker scan folders). Results are written to `AnalysedData/<...>/<subject ID>/`, i.e. next to the session's position in the tree with `RawData` replaced by `AnalysedData`; the subject ID is read from the `subject` file of the session.
 
-## Injection analysis (`mol_fMRI_v5.7`)
+## Injection analysis (`mol_fMRI_v5.8`)
 
 Standard analysis of an injection experiment (vasoactive peptides or sensor ligands): the signal after the injection is compared with a baseline to give a percent signal change map, plus time courses in hand-drawn or automatic ROIs. One functional scan and one structural scan are processed per run.
 
@@ -83,10 +83,10 @@ Standard analysis of an injection experiment (vasoactive peptides or sensor liga
 1. **Run the function-library cell and the step-selection cell.** Tick the steps to run: Bruker → NIfTI, Distortion correction (EPI only, off by default), Motion correction, Spatial smoothing, Masking. Existing results are never overwritten without asking (`OVERWRITE_POLICY`).
 2. **Choose the raw data folder** (the session folder under `RawData`), enter the functional and structural scan numbers and the window size, in **volumes**. The sequence is detected from the scan's `method` file; the *Sequence* dropdown (auto / EPI / SORDINO) overrides it, and you are asked if it cannot be detected. A sordino volume spans more time than an EPI volume (e.g. 2.4 s), so adjust the windows.
 3. **Convert and motion-correct** the functional scan (`func.nii.gz`, `mc_func.nii.gz`, `motion.1D`). For sordino the real volume TR is written into the NIfTI header. Distortion correction needs a reverse phase-encoded scan and is only possible for EPI.
-4. **Draw the masks** in fsleyes when requested, in the functional analysis folder: `mask_mean_mc_func.nii.gz` (brain without the cannulas, drawn on `middle_vol.nii.gz`) and `mask_mean_mc_func_cannulas.nii.gz` (brain including the cannulas).
+4. **Brain masks** (functional analysis folder: `mask_mean_mc_func.nii.gz`, brain without the cannulas, drawn on `middle_vol.nii.gz`, and `mask_mean_mc_func_cannulas.nii.gz`, brain including the cannulas; structural folder: `struct_mask.nii.gz`). Choose in the dropdowns at the top whether they are drawn in fsleyes (default) or made automatically (**still in testing**). The automatic structural mask (`3dSkullStrip -rat` combined with `3dAutomask`) is accurate in tests (overlap with hand-drawn masks 0.97) and can be used after a look at `mask_qc_structural.png`. The automatic functional mask (made from the structural mask) is less accurate (0.85–0.89, down to 0.7) and **must always be checked** in `mask_qc_functional.png`; tested on rat data only. Existing masks are never replaced.
 5. **Select the start volumes** of the baseline and the signal window. The notebook smooths the data inside the brain mask and computes the PSC map and PSC time series (`scm_from_sm_*.nii.gz`, `scm_timeseries_from_sm_*.nii.gz`), an exclusion mask for unreliable voxels (brain edge, low baseline, low tSNR) and a despeckled version.
 6. **Structural scan:** converted, masked (`struct_mask.nii.gz`), and the functional mean is coregistered to it (rigid body; for EPI with a bounded scaling along the phase-encoding axis). A quality check writes `coregistration_qc.png` and `coregistration_qc.txt`. The PSC maps are saved in structural space (`signal_change_map_coregistered_structural_space.nii.gz` and masked versions).
-7. **ROIs and time courses.** Either draw the ROIs in fsleyes, or use the optional automatic ROIs (strongest 3×3 voxel block inside the striatum of the SIGMA rat atlas, per side). ROI files are named `roi_{protein/aav}_{direct|aav}_{analyte}_{left|right}.nii.gz`. For each ROI the notebook saves the PSC time course (`PSC_time_series_<roi>.txt`) and a plot.
+7. **ROIs and time courses.** Either draw the ROIs in fsleyes, or use the optional automatic ROIs (strongest 3×3 voxel block inside the striatum of the SIGMA rat atlas, per side; the option "Block depth" makes it a 3×3×3 block over three slices, **still in testing**). ROI files are named `roi_{protein/aav}_{direct|aav}_{analyte}_{left|right}.nii.gz`. For each ROI the notebook saves the PSC time course (`PSC_time_series_<roi>.txt`) and a plot.
 8. **Optional diagnostics** at the end (`exclusion_diagnostics`) show which exclusion rule removes which voxels, and how much of each ROI is lost. They change no map or mask.
 
 ### Where the results are

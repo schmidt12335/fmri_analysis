@@ -9,6 +9,18 @@ Changes of the `mol_fMRI` pipeline notebook, newest version first. Each version 
 - `mol_fMRI_sordino_analysis.ipynb`: a trigger block that is at least twice as long as the shortest one (e.g. 500 volumes after ten blocks of 25 volumes) is the post-stimulation phase of the same scan and is no longer counted as an additional epoch. This allows one scan per stimulation with the stimulation blocks and the post-stimulation phase together.
 - `mol_fMRI_sordino_poststim_analysis.ipynb`: if the last scan ends with such a long trigger block, the default baseline window starts at the beginning of the post-stimulation phase and the signal window ends at the end of the scan (the window length is at most half of the phase).
 
+## v5.8
+
+Two options that are **still in testing**; both are off by default, so the notebook behaves as v5.7 unless they are switched on.
+
+### Added
+- Automatic brain masks, chosen separately for the structural and the functional mask in two dropdowns at the top (hand-drawn in fsleyes stays the default; an existing mask is never replaced).
+  - Structural mask: `3dSkullStrip -rat` combined with `3dAutomask` (`3dAutomask` alone if 3dSkullStrip fails). 3dSkullStrip alone can cut off the darker ventral brain along a straight line in images with a strong surface-coil intensity fall-off; 3dAutomask reaches the ventral edge, so the union is used. In tests against hand-drawn masks of 14 rat sessions (inside the slices covered by the hand-drawn mask) the overlap (Dice) was 0.97, lowest 0.96 (the same as 3dSkullStrip alone). It can be used after a look at the quality-check figure.
+  - Functional mask: made from the structural mask (hand-drawn or automatic), which is moved to the functional grid through the image headers and trimmed with an intensity threshold. Dice 0.89 for EPI (lowest 0.72, 13 sessions) and 0.85 for sordino (3 sessions) with an automatic or a hand-drawn structural mask. Clearly less accurate: it always needs to be checked, and it is wrong if the animal moved between the two scans. Without a drawn cannula mask the brain mask is also used as the outline.
+  - Quality check for automatic masks (`mask_quality_check`): overlay figures `mask_qc_structural.png` and `mask_qc_functional.png` (red = mask, cyan dashed = structural mask before the trimming) and warnings for separate pieces, empty slices, a mask at the image border, low edge contrast and, for the functional mask, a large change by the intensity trimming. The checks only catch gross failures; for functional masks they could not tell the weaker masks from the good ones, so the figure has to be looked at. Automatic masks are recorded in `<mask>.source.json`; a hand-drawn mask saved over an automatic one counts as hand-drawn again.
+  - Tested on rat data only. The test scripts (`scripts/automask_test.py`, `scripts/automask_coreg_test.py`) are in the repository. With automatic instead of hand-drawn masks the functional → structural registration fitted equally well in 6 sessions (transforms differed by 0.4 mm and 2° on average).
+- 3D automatic ROIs: the dropdown "Block depth" in the automatic ROI section makes the ROI a 3×3×3 voxel block over three consecutive slices instead of a 3×3 block in one slice (default). The whole block has to lie inside the striatum and the despeckled mask. The z-scores of 3D blocks are not comparable with those of the 3×3 blocks.
+
 ## v5.7
 
 ### Added

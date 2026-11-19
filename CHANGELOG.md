@@ -1,13 +1,6 @@
 # Changelog
 
-Changes of the `mol_fMRI` pipeline notebook, newest version first. Each version is a separate notebook (`mol_fMRI_v5.x.ipynb`); older notebooks stay unchanged.
-
-## Unreleased
-
-### Changed (SORDINO stimulation notebooks)
-- `mol_fMRI_sordino_analysis.ipynb`: the stimulation timing that is not stored in the data is entered in a new input cell instead of being fixed in the code: Stimulation ON (required, no default, so a wrong value is never used silently), Stimulation OFF (default: the rest of the trigger block), hemodynamic lag and the OFF window at the end of the block. The trigger blocks read from the method files are shown next to it.
-- `mol_fMRI_sordino_analysis.ipynb`: a trigger block that is at least twice as long as the shortest one (e.g. 500 volumes after ten blocks of 25 volumes) is the post-stimulation phase of the same scan and is no longer counted as an additional epoch. This allows one scan per stimulation with the stimulation blocks and the post-stimulation phase together.
-- `mol_fMRI_sordino_poststim_analysis.ipynb`: if the last scan ends with such a long trigger block, the default baseline window starts at the beginning of the post-stimulation phase and the signal window ends at the end of the scan (the window length is at most half of the phase).
+Two parts: the injection pipeline notebook `mol_fMRI_v5.x.ipynb` (below, newest version first; each version is a separate notebook, older notebooks stay unchanged) and the [electrical stimulation notebooks](#electrical-stimulation-notebooks) (at the end; not versioned, so the entries are dated).
 
 ## v5.8
 
@@ -52,3 +45,36 @@ Two options that are **still in testing**; both are off by default, so the noteb
 - The exclusion mask (`mask_thresholded.nii.gz`) replaces the 15–80 percentile cut. A voxel is kept only if it is at least 3 voxels from the brain edge, has a baseline of at least 50% of the median, and a baseline tSNR (`tsnr_baseline_*.nii.gz`) of at least 60% of the median. The mask is moved to structural space with the coregistration affine (`struct_mask_from_functional.nii.gz`) and intersected with the structural brain (`struct_mask_final.nii.gz`), which removes the isolated dead voxels inside clusters and the voxels outside the structural brain.
 - A coregistration quality check (`coregistration_qc`) compares the registration with a header-only alignment, warns about implausible transforms, and writes `coregistration_qc.png` (overlay) and `coregistration_qc.txt`. It only reports; it does not change the transform.
 - Coregistration may scale the functional image along the phase-encoding axis (within 0.92–1.08, rotations ≤ 5°, shifts ≤ 2 mm) to compensate EPI stretching. The axis comes from the "Phase-encoding axis" dropdown or is detected from brkraw's BIDS sidecar (cached in `func.detected_pe.json`); the scaling is switched off when distortion correction is used or the axis is unknown.
+
+## Electrical stimulation notebooks
+
+The notebooks for the analysis of electrical stimulation experiments (EPI: `mol_fMRI_electric_stim_*.ipynb`, SORDINO: `mol_fMRI_sordino_*.ipynb`, with `electric_stim_helpers.py`, `electric_stim_session.py`, `electric_stim_atlas.py`, `sordino_helpers.py`) have **one version number for the whole set**, EPI and SORDINO together. It is the constant `STIM_NOTEBOOKS_VERSION` in `electric_stim_session.py`, printed by the first code cell of every notebook and saved as `stim_notebooks_version` in the `session.json` of every preprocessing run (an analysis notebook notes if a session was preprocessed with another version). A change of the notebooks gets a new version here and a new value of the constant.
+
+Versions up to 2.1 were assigned afterwards from the git history (the dates are those of the commits; several commit messages are only "minor changes", so those entries only say which notebooks were touched). See [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) for the description of the notebooks.
+
+### v2.2 (2026-11-19)
+- Version numbers for the stimulation notebooks (see above). Sessions made before this version show "unknown (made before version numbers)".
+- `mol_fMRI_sordino_analysis.ipynb`: the stimulation timing that is not stored in the data is entered in a new input cell instead of being fixed in the code: Stimulation ON (required, no default, so a wrong value is never used silently), Stimulation OFF (default: the rest of the trigger block), hemodynamic lag and the OFF window at the end of the block. The trigger blocks read from the method files are shown next to it.
+- `mol_fMRI_sordino_analysis.ipynb`: a trigger block that is at least twice as long as the shortest one (e.g. 500 volumes after ten blocks of 25 volumes) is the post-stimulation phase of the same scan and is no longer counted as an additional epoch. This allows one scan per stimulation with the stimulation blocks and the post-stimulation phase together.
+- `mol_fMRI_sordino_poststim_analysis.ipynb`: if the last scan ends with such a long trigger block, the default baseline window starts at the beginning of the post-stimulation phase and the signal window ends at the end of the scan (the window length is at most half of the phase).
+- 2026-11-17: standalone scripts (`mol_fMRI_electric_stim_stitching.py`, `mol_fMRI_sordino_stitching.py`, `roi_atlas_analysis.py`) moved to `scripts/`; self-contained old notebooks moved to `archive/`. The notebooks still import the helper modules from the root folder.
+
+### v2.1 (2026-11-11)
+- Improvements to the SORDINO analysis notebooks; `mol_fMRI_sordino_preprocessing.ipynb` added to the repository (2026-11-06). `electric_stim_session.py` and the EPI notebooks received small changes at the same time.
+- Changes to the SORDINO post-stimulation notebook and to the EPI preprocessing notebook (2026-11-11).
+
+### v2.0 (2026-10-29)
+- SORDINO (zero echo time, 3D radial) stimulation notebooks added: `mol_fMRI_sordino_preprocessing.ipynb`, `mol_fMRI_sordino_analysis.ipynb`, `mol_fMRI_sordino_poststim_analysis.ipynb`, with `sordino_helpers.py` and `mol_fMRI_sordino_stitching.py`. The volume TR is `PVM_ScanTime / PVM_NRepetitions` (the converted NIfTIs carry a wrong TR) and the epochs come from the trigger blocks of the method file, because the stimulation paradigm is not stored in it.
+- The older single-notebook version of the EPI analysis is kept as `mol_fMRI_elstim_old.ipynb`.
+
+### v1.2 (2026-10-12)
+- Option to normalise the signal level of the scans in the preprocessing, which removes jumps between stitched scans (`scan_normalization.csv`) (2026-10-08).
+- The data folder is no longer hard-coded: `fmri_paths.py` asks once per workstation and saves the folder (`fmri_root.txt`, or the environment variable `FMRI_ROOT`) (2026-10-09).
+- Changes to the coregistration in `mol_fMRI_electric_stim_analysis.ipynb` (2026-10-12).
+
+### v1.1 (2026-10-07)
+- Distortion correction (reverse phase-encoded EPI, FSL topup) added to the EPI preprocessing; adjustments to the EPI analysis notebook (2026-10-06).
+- Fixes in the distortion correction and the new post-stimulation (LTP) analysis notebook, `mol_fMRI_electric_stim_poststim_analysis.ipynb` (2026-10-07).
+
+### v1.0 (2026-10-05)
+- New separate notebooks for the preprocessing (`mol_fMRI_electric_stim_preprocessing.ipynb`) and the analysis (`mol_fMRI_electric_stim_analysis.ipynb`) of electrical stimulation experiments.

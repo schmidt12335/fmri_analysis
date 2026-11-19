@@ -11,6 +11,10 @@ import re
 from pathlib import Path
 
 SESSION_FILE = "session.json"
+
+# Version of the electrical stimulation notebooks (EPI and SORDINO, with their helper modules): one number for the whole set.
+# It is printed at the top of every notebook and saved in session.json. Change it together with a new entry in CHANGELOG.md.
+STIM_NOTEBOOKS_VERSION = "2.2"
 STITCHED_PATTERN = re.compile(r"stitched_(\d+(?:-\d+)*)_(.+)")
 PATH_KEYS = ("in_path", "analysed_func_dir", "analysed_struct_dir", "analysis_dir")
 
@@ -20,6 +24,8 @@ FORCE_RERUN = False
 
 def save_session(session_dir, **state):
     out = {k: (str(v) if isinstance(v, Path) else v) for k, v in state.items()}
+    # a session that is saved again (loaded by an analysis notebook) keeps the version of the preprocessing that made it
+    out.setdefault("stim_notebooks_version", STIM_NOTEBOOKS_VERSION)
     out["saved_at"] = datetime.datetime.now().isoformat(timespec="seconds")
     path = Path(session_dir) / SESSION_FILE
     path.write_text(json.dumps(out, indent=2))
@@ -93,6 +99,7 @@ def infer_session(analysis_dir):
         "drop_vols": int(drop.group(1)) if (drop := re.search(r"_drop(\d+)", analysed_func_dir.name)) else 0,
         "mask_file": str(analysed_func_dir / "mask_mean_mc_func.nii.gz"),
         "structural_file_for_coregistration": str(struct_file),
+        "stim_notebooks_version": "unknown (made before version numbers)",
     }
 
 
@@ -124,6 +131,7 @@ def load_session(analysis_dir):
                 session[key] = Path(session[key])
         # sessions saved without masking stored the uncleaned scan; the cleaned one is always required
         session["structural_file_for_coregistration"] = str(cleaned_structural_file(session["analysed_struct_dir"]))
+        session.setdefault("stim_notebooks_version", "unknown (made before version numbers)")
         return session, str(path)
     return infer_session(analysis_dir), "inferred from folder layout"
 

@@ -22,6 +22,8 @@ flowchart LR
 | Electrical stimulation, EPI | `mol_fMRI_electric_stim_preprocessing.ipynb`, then `..._analysis.ipynb` and/or `..._poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 | Electrical stimulation, SORDINO | `mol_fMRI_sordino_preprocessing.ipynb`, then `mol_fMRI_sordino_analysis.ipynb` and/or `mol_fMRI_sordino_poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 
+Versions: the injection notebook has its own file per version (`mol_fMRI_v5.x.ipynb`); the electrical stimulation notebooks (EPI and SORDINO) share one version number (currently 2.2), printed when a notebook starts and saved in every `session.json`. Both histories are in [CHANGELOG.md](CHANGELOG.md).
+
 The notebooks `mol_fMRI_v5.4` to `v5.6` and `mol_fMRI_elstim_old` are earlier versions that stay in this folder because they use the helper modules next to them. All older, self-contained notebooks are in [archive/](archive). Both are kept for reference only.
 
 ## Setup

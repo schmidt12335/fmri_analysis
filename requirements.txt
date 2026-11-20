@@ -11,6 +11,7 @@ nilearn == 0.10.4
 
 #Data Plotting
 matplotlib == 3.9.2
+pyvista >= 0.43  # 3D rendering in plot_slice_stack.py (video: imageio-ffmpeg)
 pillow >= 10.0
 imageio-ffmpeg >= 0.4.9
 

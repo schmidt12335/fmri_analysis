@@ -108,7 +108,7 @@ AnalysedData/<...>/<subject ID>/
 | Script | Purpose |
 |---|---|
 | `scripts/nifti_to_mp4.py` | Movie of the time series of one slice of a 4D NIfTI file |
-| `plot_slice_stack.py` | Signal change maps on an atlas as a stack of slices (figure) |
+| `plot_slice_stack.py` | 3D figures of signal change maps on the atlas: slice stack (flat tiles in rows like in fUSI papers, or slabs behind each other), volume rendering and surface rendering; PNG, interactive viewer you can rotate with the mouse, and rotating MP4. Needs `pyvista` and `imageio-ffmpeg`. Run without arguments for a form (View dropdown: stack / volume / surface); command line e.g. `--view volume --movie out.mp4`; use `--projection max` for small or sparse effects |
 | `scripts/roi_atlas_analysis.py` | Time courses of every region of a multi-label atlas |
 | `mol_fMRI_distortion_correction_rp.py` | EPI distortion correction (FSL topup), used by the notebooks |
 

@@ -1,24 +1,31 @@
-"""3D figures of signal change maps on an atlas: slice stack, volume rendering and surface rendering.
+"""3D figures of signal change maps on the atlas: slice stack, volume rendering and surface rendering.
 
-view="stack" (default)   the map on thick slices of the atlas template. Two layouts:
-                           layout="tiled"    flat tiles side by side in rows (like the slice stacks in fUSI / fMRI papers), seen from a
-                                             slightly oblique angle with an orthographic camera, so every slice is fully visible
-                           layout="physical" the slabs stand behind each other, `thickness` mm of atlas with `gap` mm of space in between
-view="volume"            volume rendering: translucent brain with the map as glowing volume inside
-view="surface"           surface rendering: translucent brain surface with nested iso-surfaces of the map
+The rendering follows the 3D viewer of the deConfUSIon toolbox (fusiVolumeGUI, github.com/SonerCgu/deConfUSIon):
 
-Every view can be saved as a figure (png/pdf/svg, with colorbar), opened in an interactive window that can be rotated with the mouse
-and written as a rotating video (mp4). The rendering is done with pyvista / VTK (`pip install pyvista imageio-ffmpeg`).
+view="stack" (default)  slabs of the atlas (mean over `slab_slices` atlas slices) laid out as flat tiles next to each other, each tile a
+                        little higher than its left neighbour, seen at a slight angle with a parallel (orthographic) camera. Every
+                        tile has a front and a back face that show the anatomy with the map on top, and side walls along the exact
+                        outline of the brain; the slab thickness is exaggerated by `depth_gain` for the display only.
+view="volume"           volume rendering of one colour volume: the atlas anatomy is a faint blue-gray haze whose opacity is set for the
+                        whole brain (`atlas_opacity`, along the longest path through the brain), the map is drawn in its colours with
+                        an opacity that rises with the value, and the anatomy is dimmed around strong responses so they are not hidden.
+view="surface"          translucent brain surface with the map as unsmoothed voxels (exact colour per voxel) or as a smooth contour.
+
+The map is shown where the measurement covers the brain (`coverage`, default: brain_mask_atlasspace.nii.gz next to the map, otherwise
+where the map is not 0). Output: a figure (png/pdf/svg, with colorbar), an interactive window that can be rotated with the mouse,
+and a rotating video (mp4). Needs pyvista and, for the video, imageio-ffmpeg.
+
+Mouse maps are in the space of the DevCCF P56 MRI template, which contains the Allen CCFv3 template; the Allen template
+(allen_ccfv3_template_50um.nii.gz, made by tools/build_allen_atlas.py) is the default anatomy. Rat maps use the SIGMA template.
 
 Run without arguments (`python plot_slice_stack.py`) to get a form that asks for the files and all settings.
-
-Command line (maps from the atlas_space folder of the electric stimulation notebooks, same grid as the template):
-    python plot_slice_stack.py atlas_space/stim_diff_psc_atlasspace.nii.gz template_registration_0.1mm.nii.gz stack.png \
-        --threshold 0.5 --vmax 3 --label "Signal change (%)"
-    python plot_slice_stack.py map.nii.gz template.nii.gz vol.png --view volume --movie vol.mp4
+Command line:
+    python plot_slice_stack.py roi_atlas_mouse/atlas_space/stim_tstat_atlasspace.nii.gz stack.png --threshold 2 --label t
+    python plot_slice_stack.py map.nii.gz vol.png --view volume --movie vol.mp4
+(the anatomy is found automatically for maps made by the pipeline; otherwise give it with --underlay)
 In a notebook:
     from plot_slice_stack import plot_slice_stack
-    plot_slice_stack(map_file, template_file, "stack.png", threshold=2, vmax=6, label="t")
+    plot_slice_stack(map_file, "stack.png", threshold=2, label="t")
 """
 import argparse
 import json
@@ -33,60 +40,27 @@ import matplotlib
 import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
 from matplotlib.cm import ScalarMappable
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
 from nibabel.processing import resample_from_to
 from scipy import ndimage
 
-# Per slice direction: (index of the slice axis, viewing direction, "up" direction on screen) in RAS world axes
-# (x = right, y = anterior, z = superior). Coronal is seen from posterior, sagittal from the left, axial from above.
-AXES = {
-    "coronal": (1, np.array([0, 1, 0]), np.array([0, 0, 1])),
-    "sagittal": (0, np.array([1, 0, 0]), np.array([0, 0, 1])),
-    "axial": (2, np.array([0, 0, -1]), np.array([0, 1, 0])),
-}
-# camera presets of the tiled layout: (azimuth, elevation) in degrees
-TILE_VIEWS = {"paper oblique": (14.0, 10.0), "shallow oblique": (7.0, 5.0), "face-on": (0.0, 0.0)}
+# FSLeyes "blackbdy_iso" (the default map colours of deConfUSIon), 17 control points of the 256-entry table
+BLACKBODY = LinearSegmentedColormap.from_list("blackbdy", [
+    "#000000", "#2f0400", "#4b0000", "#640000", "#7e0000", "#980000", "#b40000", "#d10000", "#ec0f00",
+    "#fc3c00", "#ff6600", "#ff8800", "#ffa300", "#ffbe00", "#ffd702", "#ffef45", "#fffcf2"])
+NEG_CMAP = LinearSegmentedColormap.from_list("blackbdy_neg", ["#000000", "#001040", "#0030a0", "#0060ff", "#00b0ff", "#c0f4ff"])
 VIEWS = ("stack", "volume", "surface")
-EDGE_COLOR = np.array([0.12, 0.12, 0.12])
+# Slice direction: (slice axis, in-plane axis shown left -> right, in-plane axis shown bottom -> top) in RAS voxel axes
+AXES = {"coronal": (1, 0, 2), "sagittal": (0, 1, 2), "axial": (2, 0, 1)}
+# Volume / surface camera presets: direction from the brain to the camera in RAS (x right, y anterior, z dorsal)
+CAMERA_PRESETS = {"oblique": (-0.6, -0.45, 0.7), "dorsal": (0.0, -0.05, 1.0), "coronal": (0.0, -1.0, 0.08), "sagittal": (-1.0, 0.0, 0.08),
+                  "frontal oblique": (-0.55, 0.7, 0.45)}
+STACK_VIEWS = {"paper oblique": (-6.0, 8.0), "shallow oblique": (-3.0, 4.0), "face-on": (0.0, 0.0)}
 SETTINGS_FILE = Path(__file__).resolve().parent / "plot_slice_stack_last.json"
-NEG_CMAP = LinearSegmentedColormap.from_list("neg", ["#00ffff", "#0030ff"])
-
-
-def _load_canonical(path_or_img, reference=None):
-    img = nib.as_closest_canonical(nib.load(str(path_or_img)) if not isinstance(path_or_img, nib.Nifti1Image) else path_or_img)
-    if reference is not None and (img.shape[:3] != reference.shape[:3] or not np.allclose(img.affine, reference.affine, atol=1e-3)):
-        img = resample_from_to(img, (reference.shape[:3], reference.affine), order=1)
-    data = np.asarray(img.get_fdata(dtype=np.float32))
-    return img, (data[..., 0] if data.ndim == 4 else data)
-
-
-def _fill_holes(mask, slice_axis):
-    out = np.zeros_like(mask)
-    for i in range(mask.shape[slice_axis]):
-        idx = [slice(None)] * 3
-        idx[slice_axis] = i
-        out[tuple(idx)] = ndimage.binary_fill_holes(mask[tuple(idx)])
-    return out
-
-
-def _alpha_ramp(frac, alpha_min, alpha_max):
-    """Opacity of the map: alpha_min just above the threshold, alpha_max at the colour scale maximum. The square root lifts weak
-    values so that they are still clearly visible."""
-    return alpha_min + (alpha_max - alpha_min) * np.sqrt(np.clip(frac, 0, 1))
-
-
-def _overlay_colors(values, cmap_pos, cmap_neg, threshold, vmax, alpha_min=1.0, alpha_max=1.0):
-    """RGBA for the overlay values; voxels with |value| <= threshold are transparent."""
-    span = max(vmax - threshold, 1e-9)
-    frac = np.clip((np.abs(values) - threshold) / span, 0, 1)
-    rgba = np.where((values >= 0)[..., None], cmap_pos(frac), cmap_neg(frac))
-    rgba[..., 3] = np.where(np.abs(values) > threshold, _alpha_ramp(frac, alpha_min, alpha_max), 0)
-    return rgba
 
 
 def _pyvista():
-    """Imports pyvista (with a helpful message if it is missing)."""
     try:
         import pyvista as pv
     except ImportError as err:
@@ -94,532 +68,611 @@ def _pyvista():
     return pv
 
 
-def _upsample_inplane(arr, factor, slice_axis, order=1):
-    """Smooth enlargement of a 3D array in the two in-plane directions (the slice direction is kept).
-    The first and last sample stay where they are, so the spacing becomes (n - 1) * spacing / (m - 1)."""
-    if factor == 1:
-        return arr
-    zoom = [1.0 if a == slice_axis else float(factor) for a in range(3)]
-    return ndimage.zoom(arr, zoom, order=order)
+def _colormap(name):
+    if not isinstance(name, str):
+        return name
+    if name.lower() in ("blackbdy", "blackbdy_iso", "blackbody"):
+        return BLACKBODY
+    return matplotlib.colormaps[name]
 
 
-def _prepare(map_file, underlay_file, axis, flip_view, brain_mask, under_threshold, threshold, vmax, cmap):
-    """Loads and normalises the data; everything the views share."""
-    slice_axis, view_dir, up = AXES[axis]
-    view_dir = -view_dir if flip_view else view_dir
-    right = np.cross(view_dir, up)
-    under_img, under = _load_canonical(underlay_file)
-    _, over = _load_canonical(map_file, reference=under_img)
-    over = np.nan_to_num(over)
-    if brain_mask is not None:
-        _, mask3d = _load_canonical(brain_mask, reference=under_img)
-        mask3d = mask3d > 0
-    else:
-        mask3d = _fill_holes(under > under_threshold * np.percentile(under[under > 0], 99), slice_axis)
-    over = np.where(mask3d, over, 0)
+def _load(path, reference=None, order=1):
+    img = nib.as_closest_canonical(nib.load(str(path)))
+    if reference is not None and (img.shape[:3] != reference.shape[:3] or not np.allclose(img.affine, reference.affine, atol=1e-3)):
+        img = resample_from_to(img, (reference.shape[:3], reference.affine), order=order, cval=0.0)
+    data = np.asarray(img.get_fdata(dtype=np.float32))
+    return img, (data[..., 0] if data.ndim == 4 else data)
+
+
+def find_anatomy(map_file):
+    """(anatomy, brain mask) for a map made by the pipeline: the atlas folder of the analysis records the template it was registered
+    to (atlas_used.json); the Allen template next to it is the anatomy. Falls back to template_registration_*.nii.gz."""
+    for folder in list(Path(map_file).resolve().parents)[:4]:
+        record = folder / "atlas_used.json"
+        if record.is_file():
+            template = Path(json.loads(record.read_text())["template"])
+            allen = template.parent / "allen_ccfv3_template_50um.nii.gz"
+            mask = template.parent / "devccf_brainmask_50um.nii.gz"
+            if allen.is_file():
+                return str(allen), str(mask) if mask.is_file() else ""
+            return str(template), ""
+    for folder in list(Path(map_file).resolve().parents)[:4]:
+        found = sorted(folder.glob("template_registration_*mm.nii.gz"))
+        if found:
+            return str(found[0]), ""
+    return "", ""
+
+
+def _prepare(map_file, underlay_file, brain_mask, coverage, threshold, vmax, color_min, cmap, sign):
+    """Loads the data on the grid of the anatomy (RAS) and computes the colour and opacity of the map (deConfUSIon transfer)."""
+    under_img, under = _load(underlay_file)
     aff = under_img.affine
     if np.abs(aff[:3, :3] - np.diag(np.diag(aff[:3, :3]))).max() > 1e-4:
-        raise ValueError("The images must be in standard (non-oblique) orientation.")
-    in_brain = under[mask3d]
-    norm_under = (np.percentile(in_brain, 1), np.percentile(in_brain, 99.5))
+        raise ValueError("The anatomy must be in standard (non-oblique) orientation.")
+    _, over = _load(map_file, reference=under_img)
+    over = np.nan_to_num(over)
+    if brain_mask:
+        brain = _load(brain_mask, reference=under_img, order=0)[1] > 0.5
+    else:
+        tissue = under[under > 0]
+        brain = under > 0.05 * np.percentile(tissue, 99) if tissue.size else under > 0
+        brain = ndimage.binary_fill_holes(ndimage.binary_opening(brain, iterations=2))
+    if coverage is None:
+        guess = Path(map_file).with_name("brain_mask_atlasspace.nii.gz")
+        coverage = str(guess) if guess.is_file() else ""
+    covered = (_load(coverage, reference=under_img, order=0)[1] > 0.5) if coverage else (over != 0)
+    inside = brain & covered
+    psc = np.where(inside, over, np.nan).astype(np.float32)
+
+    tissue = under[brain]
+    hi = np.percentile(tissue, 99.9) if tissue.size else 1.0
+    anatomy = np.clip(under / max(hi, 1e-9), 0, 1).astype(np.float32)
+    anatomy[~brain] = 0
+
+    values = np.abs(psc[np.isfinite(psc)])
+    shown = values[values > threshold]
     if vmax is None:
-        shown = np.abs(over[np.abs(over) > threshold])
         vmax = float(np.percentile(shown, 99.5)) if shown.size else threshold + 1
-    cmap_pos = matplotlib.colormaps[cmap] if isinstance(cmap, str) else cmap
-    world = [aff[a, a] * np.arange(under.shape[a]) + aff[a, 3] for a in range(3)]
-    extent = []
-    for a in range(3):
-        present = np.where(mask3d.any(axis=tuple(b for b in range(3) if b != a)))[0]
-        extent.append((world[a][present].min(), world[a][present].max()))
-    return SimpleNamespace(
-        slice_axis=slice_axis, view_dir=view_dir, up=up.astype(float), right=right.astype(float), under=under, over=over, mask=mask3d,
-        spacing=np.abs(np.diag(aff)[:3]), origin=aff[:3, 3], world=world, norm_under=norm_under, vmax=vmax, threshold=threshold,
-        cmap_pos=cmap_pos, cmaps=(cmap_pos, NEG_CMAP), extent=np.array(extent), negative=bool((over < -threshold).any()))
+    negative = sign != "positive" and bool((psc < -threshold).any())
+    return SimpleNamespace(affine=aff, spacing=np.abs(np.diag(aff)[:3]), world=[aff[a, a] * np.arange(under.shape[a]) + aff[a, 3] for a in range(3)],
+                           anatomy=anatomy, brain=brain, covered=inside, psc=psc, threshold=float(threshold), vmax=float(vmax),
+                           color_min=float(0.0 if color_min is None else color_min), cmap=_colormap(cmap), sign=sign,
+                           negative=negative)
 
 
-def _gray(c, values):
-    lo, hi = c.norm_under
-    return np.clip((values - lo) / max(hi - lo, 1e-9), 0, 1)
-
-
-def _direction(c, azimuth, elevation):
-    """Unit vector from the scene towards the camera."""
-    az, el = np.radians(azimuth), np.radians(elevation)
-    return np.cos(el) * (np.cos(az) * (-c.view_dir) + np.sin(az) * c.right) + np.sin(el) * c.up
-
-
-def _slab_centers(c, layout, thickness, gap, n_slices, slice_range, cover, reverse_order):
-    support = c.mask if cover == "brain" else (np.abs(c.over) > c.threshold)
-    present = np.where(support.any(axis=tuple(a for a in range(3) if a != c.slice_axis)))[0]
-    if slice_range is None:
-        if present.size == 0:
-            raise ValueError("Nothing to show: the map has no voxels above the threshold inside the brain.")
-        lo, hi = c.world[c.slice_axis][present].min(), c.world[c.slice_axis][present].max()
+def _transfer(c, values, alpha_max, strength, lift=True):
+    """RGB and opacity of map values (fusiOverlayAppearance + the 3D settings of deConfUSIon): the opacity rises from the threshold
+    to vmax, is lifted (square root) so that weak responses stay visible and multiplied by `strength`; the colour follows the
+    colormap between color_min and vmax. NaN (outside the coverage) is transparent."""
+    v = np.nan_to_num(values)
+    if c.sign == "positive":
+        show = v > 0
+    elif c.sign == "negative":
+        show = v < 0
     else:
-        lo, hi = sorted(slice_range)
-    if layout == "tiled":
-        n = int(n_slices or 8)
-        centers = np.linspace(lo, hi, n) if n > 1 else np.array([(lo + hi) / 2])
-        if thickness is None:
-            thickness = float(np.clip((hi - lo) / max(n - 1, 1), c.spacing[c.slice_axis], 1.0))
-    else:
-        thickness = 2.5 if thickness is None else thickness
-        pitch = thickness + gap
-        n_fit = int(np.floor((hi - lo) / pitch)) + 1
-        n = min(n_slices, n_fit) if n_slices else n_fit
-        centers = (lo + hi) / 2 - (n - 1) * pitch / 2 + pitch * np.arange(n)
-    descending = c.slice_axis != 0  # coronal: anterior first, axial: dorsal first, sagittal: left to right
+        show = v != 0
+    magnitude = np.abs(v)
+    show &= (magnitude >= c.threshold) & np.isfinite(values)
+    modulation = np.clip((magnitude - c.threshold) / max(c.vmax - c.threshold, 1e-9), 0, 1)
+    if c.sign != "positive":
+        modulation = 0.2 + 0.8 * modulation
+    alpha = np.where(show, alpha_max * modulation, 0.0)
+    if lift and alpha_max > 0:
+        alpha = alpha_max * np.sqrt(alpha / alpha_max)
+    alpha = np.minimum(alpha_max, alpha * strength)
+    scale = np.clip((magnitude - c.color_min) / max(c.vmax - c.color_min, 1e-9), 0, 1)
+    rgb = np.where((v >= 0)[..., None], c.cmap(scale)[..., :3], NEG_CMAP(scale)[..., :3])
+    return rgb.astype(np.float32), alpha.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------------------------------------------- stack view
+def _slabs(c, axis, n_tiles, slab_slices, slice_range, cover, reverse_order, projection="mean"):
+    """Slab centres along the slice axis (atlas voxel indices) and the mean anatomy / map / brain outline of every slab."""
+    sa = AXES[axis][0]
+    support = c.brain if cover == "brain" else c.covered
+    present = np.where(support.any(axis=tuple(a for a in range(3) if a != sa)))[0]
+    if slice_range is not None:
+        w = c.world[sa]
+        present = np.where((w >= min(slice_range)) & (w <= max(slice_range)))[0]
+    if present.size == 0:
+        raise ValueError("Nothing to show: no brain voxel with data in the selected range.")
+    half_lo, half_hi = (slab_slices - 1) // 2, slab_slices - 1 - (slab_slices - 1) // 2
+    lo, hi = present.min() + half_lo, present.max() - half_hi
+    if lo > hi:
+        lo = hi = int(round((present.min() + present.max()) / 2))
+    centres = np.unique(np.round(np.linspace(lo, hi, n_tiles)).astype(int))
+    descending = sa != 0  # coronal: anterior first, axial: dorsal first, sagittal: left first
     if descending != bool(reverse_order):
-        centers = centers[::-1]
-    return centers, float(thickness)
+        centres = centres[::-1]
+    slabs = []
+    for centre in centres:
+        idx = np.arange(max(0, centre - half_lo), min(c.anatomy.shape[sa], centre + half_hi + 1))
+        with np.errstate(invalid="ignore"), np.testing.suppress_warnings() as sup:
+            sup.filter(RuntimeWarning)
+            block = c.psc.take(idx, axis=sa)
+            if projection == "max":  # the value with the largest magnitude, so small or sparse responses are not averaged away
+                pick = np.nanargmax(np.where(np.isfinite(block), np.abs(block), -1), axis=sa)
+                psc = np.take_along_axis(block, np.expand_dims(pick, sa), axis=sa).squeeze(sa)
+            else:
+                psc = np.nanmean(block, axis=sa)
+        slabs.append(SimpleNamespace(anatomy=c.anatomy.take(idx, axis=sa).mean(axis=sa), brain=c.brain.take(idx, axis=sa).any(axis=sa),
+                                     psc=psc, position=float(c.world[sa][idx].mean()), thickness=len(idx) * c.spacing[sa]))
+    return slabs
 
 
-def _build_slab(pv, c, center, thickness, direction, *, projection, upsample, alpha, alpha_min, alpha_max, outline, side_color,
-                edge_voxels, tissue_threshold, both_caps):
-    """One slab as closed 3D solid in world coordinates. Returns None if the slab has no brain."""
-    slice_axis = c.slice_axis
-    members = np.where(np.abs(c.world[slice_axis] - center) <= thickness / 2 + 1e-6)[0]
-    if members.size == 0:
-        members = np.array([int(np.argmin(np.abs(c.world[slice_axis] - center)))])
-    sub_under = c.under.take(members, axis=slice_axis)
-    sub_mask = c.mask.take(members, axis=slice_axis).astype(np.float32)
-    sub_over = c.over.take(members, axis=slice_axis)
-    slab_over = np.expand_dims(sub_over.max(axis=slice_axis) if projection == "max" else sub_over.mean(axis=slice_axis), slice_axis)
-
-    # Outline of the slab = outline of its front layer (the one that faces the camera), extruded through the slab. The brain tapers, so the
-    # average over the layers would be larger than the front layer and show background at the rim of the front face. The outline is the
-    # brain mask restricted to bright tissue (the templates have a dark rim of dura/CSF inside the mask), holes (ventricles) filled,
-    # largest piece only.
-    front_layer = -1 if direction[slice_axis] > 0 else 0
-    front_gray = _gray(c, sub_under.take(front_layer, axis=slice_axis))
-    outline_2d = (sub_mask.take(front_layer, axis=slice_axis) > 0.5) & (ndimage.gaussian_filter(front_gray, 0.7) > tissue_threshold)
-    outline_2d = ndimage.binary_fill_holes(ndimage.binary_opening(outline_2d))
-    pieces, n_pieces = ndimage.label(outline_2d)
-    if n_pieces > 1:
-        outline_2d = pieces == 1 + int(np.argmax(ndimage.sum(outline_2d, pieces, range(1, n_pieces + 1))))
-    if not outline_2d.any():
-        return None
-
-    # Everything in the two in-plane directions at `upsample` times the resolution
-    prism = _upsample_inplane(np.expand_dims(outline_2d.astype(np.float32), slice_axis), upsample, slice_axis)
-    sigma = [0.0 if a == slice_axis else 1.3 * upsample for a in range(3)]
-    prism = np.repeat(ndimage.gaussian_filter(prism, sigma), len(members), axis=slice_axis)
-    under_up = _upsample_inplane(sub_under, upsample, slice_axis, order=3)
-    over_up = _upsample_inplane(slab_over, upsample, slice_axis)
-    gray = _gray(c, under_up)
-    rgb = np.repeat(gray[..., None], 3, axis=-1)
-    ov = _overlay_colors(np.repeat(over_up, len(members), axis=slice_axis), *c.cmaps, c.threshold, c.vmax, alpha_min, alpha_max)
-    a = (ov[..., 3] * alpha)[..., None]
-    rgb = rgb * (1 - a) + ov[..., :3] * a
-    rgb_sides = np.array([0.62, 0.62, 0.62], dtype=np.float32) * (1 - a) + ov[..., :3] * a  # neutral tissue gray, map colour where active
-
-    # The template is 0 outside the brain: take the colour of the nearest voxel well inside the outline, so that neither the sides
-    # nor the rim of the front face turn black
-    footprint = np.ones([1 if a_ == slice_axis else 3 for a_ in range(3)], dtype=bool)
-    interior = ndimage.binary_erosion(prism > 0.5, structure=footprint, iterations=max(1, int(round(edge_voxels * upsample))))
-    if interior.any():
-        nearest = tuple(ndimage.distance_transform_edt(~interior, return_distances=False, return_indices=True))
-        rgb = rgb[nearest]
-        rgb_sides = rgb_sides[nearest]
-    if side_color == "anatomy":
-        rgb_sides = rgb
-
-    # Pad (closed solid; the colours continue outwards so that nothing darkens at the borders)
-    pad = 2
-    pad_width = [(pad, pad)] * 3
-    pad_width[slice_axis] = (1, 1)
-    prism = np.pad(prism, pad_width)
-    rgb = np.pad(rgb, pad_width + [(0, 0)], mode="edge")
-    rgb_sides = np.pad(rgb_sides, pad_width + [(0, 0)], mode="edge")
-
-    orig_dims, up_dims = np.array(sub_under.shape), np.array(under_up.shape)
-    step = np.where(up_dims > 1, (orig_dims - 1) * c.spacing / np.maximum(up_dims - 1, 1), c.spacing)
-    origin = np.array([c.world[a_][members[0]] if a_ == slice_axis else c.world[a_][0] for a_ in range(3)])
-    origin = origin - np.array([1 if a_ == slice_axis else pad for a_ in range(3)]) * step
-    grid = pv.ImageData(dimensions=tuple(int(d) for d in prism.shape), spacing=tuple(float(s) for s in step), origin=tuple(float(o) for o in origin))
-    grid.point_data["prism"] = prism.ravel(order="F")
-    grid.point_data["rgb"] = np.stack([rgb[..., k].ravel(order="F") for k in range(3)], axis=1).astype(np.float32)
-    grid.point_data["rgb_sides"] = np.stack([rgb_sides[..., k].ravel(order="F") for k in range(3)], axis=1).astype(np.float32)
-
-    surface = grid.contour([0.5], scalars="prism", method="marching_cubes").clean()
-    if surface.n_points == 0:
-        return None
-    surface = surface.compute_normals(cell_normals=True, point_normals=False, auto_orient_normals=True, consistent_normals=True)
-    surface = surface.sample(grid)
-    normal_along = surface.cell_data["Normals"][:, slice_axis]
-    is_cap = np.abs(normal_along) > 0.95
-    # only the face turned to the camera is drawn (the other one is never visible), unless the scene can be turned around
-    keep = is_cap if both_caps else is_cap & (normal_along * np.sign(direction[slice_axis] or 1.0) > 0)
-    caps = surface.extract_cells(np.where(keep)[0]).extract_surface(algorithm=None)
-    body = surface.extract_cells(np.where(~is_cap)[0]).extract_surface(algorithm=None)
-    caps.point_data["color"] = caps.point_data["rgb"]
-    body.point_data["color"] = body.point_data["rgb_sides"]
-    edge = caps.extract_feature_edges(boundary_edges=True, feature_edges=False, manifold_edges=False, non_manifold_edges=False) if outline and caps.n_points else None
-    return SimpleNamespace(caps=caps, body=body, edge=edge, position=float(c.world[slice_axis][members].mean()))
+def _image_orientation(arr2d, axis):
+    """2D slab (two remaining RAS axes in order) -> image with [row, col], row 0 at the top."""
+    sa, ax_x, ax_y = AXES[axis]
+    remaining = [a for a in range(3) if a != sa]
+    img = arr2d if remaining.index(ax_x) == 0 else arr2d.T  # now [x, y]
+    if axis == "sagittal":
+        img = img[::-1]  # anterior on the left
+    return img.T[::-1]  # [row = top -> bottom, col = left -> right]
 
 
-def _place(mesh, c, position, shift, depth_gain):
-    """Tiled layout: the slab is moved to the tile (shift = mm along `right` and `up`), its thickness exaggerated for display."""
-    out = mesh.copy()
-    pts = np.asarray(out.points, dtype=float).copy()
-    centre = c.centre.copy()
-    centre[c.slice_axis] = position
-    pts = pts - centre
-    pts[:, c.slice_axis] *= depth_gain
-    out.points = pts + c.right * shift[0] + c.up * shift[1]
-    return out
+def _pixel_faces(mask, x0, y0, sx, sy, z):
+    """Quads of the pixels of `mask` (row 0 at the top) in the plane z. Returns points, faces (vtk layout), pixel indices."""
+    rows, cols = np.nonzero(mask)
+    xa, xb = x0 + cols * sx, x0 + (cols + 1) * sx
+    ya, yb = y0 - rows * sy, y0 - (rows + 1) * sy
+    zz = np.full(rows.size, z)
+    pts = np.stack([np.stack([xa, ya, zz], 1), np.stack([xb, ya, zz], 1), np.stack([xb, yb, zz], 1), np.stack([xa, yb, zz], 1)], 1).reshape(-1, 3)
+    faces = np.hstack([np.full((rows.size, 1), 4), np.arange(rows.size * 4).reshape(-1, 4)]).ravel()
+    return pts, faces, (rows, cols)
 
 
-def _tile_columns(n, width, height, gap, rise, figsize):
-    """Number of columns that makes the tiles as large as possible on a figure of the given proportions."""
-    best, best_scale = 1, 0.0
-    for cols in range(1, min(n, 10) + 1):
-        rows = int(np.ceil(n / cols))
-        w = cols * width + (cols - 1) * gap * width
-        h = (rows - 1) * height * (1.2 + (cols - 1) * rise) + height * (1 + (cols - 1) * rise)
-        scale = min(figsize[0] / w, figsize[1] / h)
-        if scale > best_scale + 1e-12:
-            best, best_scale = cols, scale
-    return best
+def _wall_faces(mask, x0, y0, sx, sy, depth):
+    """Side walls along the exact pixel edges of the outline (fusiVolumeSlabGeometry). Returns points, faces, pixel indices."""
+    padded = np.pad(mask, 1)
+    pts, idx_r, idx_c = [], [], []
+    # (row offset, col offset of the neighbour) -> edge corners in (dx, dy) pixel units, dy measured downwards
+    for (dr, dc), (a, b) in (((-1, 0), ((0, 0), (1, 0))), ((1, 0), ((0, 1), (1, 1))), ((0, -1), ((0, 0), (0, 1))), ((0, 1), ((1, 0), (1, 1)))):
+        neighbour = padded[1 + dr:padded.shape[0] - 1 + dr, 1 + dc:padded.shape[1] - 1 + dc]
+        rows, cols = np.nonzero(mask & ~neighbour)
+        pa = np.stack([x0 + (cols + a[0]) * sx, y0 - (rows + a[1]) * sy], 1)
+        pb = np.stack([x0 + (cols + b[0]) * sx, y0 - (rows + b[1]) * sy], 1)
+        lo, hi = np.full((rows.size, 1), -depth / 2), np.full((rows.size, 1), depth / 2)
+        pts.append(np.stack([np.hstack([pa, lo]), np.hstack([pb, lo]), np.hstack([pb, hi]), np.hstack([pa, hi])], 1).reshape(-1, 3))
+        idx_r.append(rows)
+        idx_c.append(cols)
+    pts = np.vstack(pts)
+    n = len(pts) // 4
+    faces = np.hstack([np.full((n, 1), 4), np.arange(n * 4).reshape(-1, 4)]).ravel()
+    return pts, faces, (np.concatenate(idx_r), np.concatenate(idx_c))
 
 
-def _bounds_corners(meshes):
-    out = []
-    for m in meshes:
-        b = m.bounds
-        out.extend([(x, y, z) for x in b[0:2] for y in b[2:4] for z in b[4:6]])
-    return np.array(out)
+def _stack_layout(count, width, height, columns, gap, rise, aspect):
+    """Tile origins (top-left corner, x right / y up) as in fusiVolumeStackLayout: a strip of tiles that rise to the right; more than
+    six tiles are split into strips with the number of columns that makes the tiles largest."""
+    if columns is None:
+        columns = count
+        if count > 6:
+            best = 0
+            for nc in range(1, min(10, count) + 1):
+                nr = int(np.ceil(count / nc))
+                span = (width * (1 + (nc - 1) * (1 + gap)), height * (nr * (1.2 + (nc - 1) * rise) - 0.2))
+                score = min(aspect / span[0], 1 / span[1])
+                if score > best:
+                    best, columns = score, nc
+    columns = max(1, min(int(columns), count))
+    origins = []
+    for k in range(count):
+        col, row = k % columns, k // columns
+        origins.append((col * width * (1 + gap), -(row * height * (1.2 + (columns - 1) * rise) - col * rise * height)))
+    return origins, columns
 
 
-def _basis(c, direction):
-    """Screen axes (right, up) for a camera that looks from `direction` at the scene."""
-    view = -direction
-    right = np.cross(view, c.up)
-    right /= np.linalg.norm(right)
-    return right, np.cross(right, view)
+def _build_stack(pv, c, axis, n_tiles, slab_slices, depth_gain, gap, rise, columns, slice_range, cover, reverse_order, alpha_max,
+                 strength, upsample, aspect, projection):
+    sa, ax_x, ax_y = AXES[axis]
+    sx, sy = c.spacing[ax_x] / upsample, c.spacing[ax_y] / upsample
+    slabs = _slabs(c, axis, n_tiles, slab_slices, slice_range, cover, reverse_order, projection)
+    images = []
+    for s in slabs:
+        u, brain = _image_orientation(s.anatomy, axis), _image_orientation(s.brain.astype(np.float32), axis)
+        p = _image_orientation(s.psc, axis)
+        valid = np.isfinite(p)
+        if upsample > 1:
+            u = ndimage.zoom(u, upsample, order=1)
+            brain = ndimage.zoom(brain, upsample, order=1)
+            num, den = ndimage.zoom(np.where(valid, p, 0), upsample, order=1), ndimage.zoom(valid.astype(np.float32), upsample, order=1)
+            p = np.where(den > 0.5, num / np.maximum(den, 1e-6), np.nan)
+        images.append((u, brain > 0.5, p))
+    height = max(i[0].shape[0] for i in images) * sy
+    width = max(i[0].shape[1] for i in images) * sx
+    origins, ncols = _stack_layout(len(slabs), width, height, columns, gap, rise, aspect)
+    meshes, labels = [], []
+    for s, (u, brain, p), (ox, oy) in zip(slabs, images, origins):
+        rgb, a = _transfer(c, p, alpha_max, strength)
+        colour = np.repeat(u[..., None], 3, axis=-1) * (1 - a[..., None]) + rgb * a[..., None]
+        depth = s.thickness * depth_gain
+        for z in (-depth / 2, depth / 2):  # front and back face, both textured (fusiVolumeGUI draws both)
+            pts, faces, (r, cc) = _pixel_faces(brain, ox, oy, sx, sy, z)
+            mesh = pv.PolyData(pts, faces)
+            mesh.cell_data["rgb"] = (np.clip(colour[r, cc], 0, 1) * 255).astype(np.uint8)
+            meshes.append(mesh)
+        pts, faces, (r, cc) = _wall_faces(brain, ox, oy, sx, sy, depth)
+        walls = pv.PolyData(pts, faces)
+        walls.cell_data["rgb"] = (np.repeat(np.clip(u[r, cc] * 0.7, 0, 1)[:, None], 3, axis=1) * 255).astype(np.uint8)
+        meshes.append(walls)
+        labels.append((s.position, s.thickness, (ox + width / 2, oy - height * 1.08, 0.0)))
+    scale_anchor = (origins[ncols - 1][0] + width * 0.92, origins[ncols - 1][1] - height * 1.32)
+    return SimpleNamespace(meshes=meshes, labels=labels, width=width, height=height, scale_anchor=scale_anchor, slabs=slabs)
 
 
-def _add_scalar_bar(pl, pv, bar_cmap, bar_limits, label, text_color, anchor):
-    """Colorbar in the 3D window: an invisible point carries the colour scale."""
-    marker = pv.PolyData(np.array([anchor]))
-    marker["scale"] = np.array([bar_limits[0]])
-    pl.add_mesh(marker, scalars="scale", cmap=bar_cmap, clim=bar_limits, opacity=0.0, show_scalar_bar=True,
-                scalar_bar_args={"title": label or " ", "vertical": True, "position_x": 0.9, "position_y": 0.25, "height": 0.5, "width": 0.05,
-                                 "color": text_color, "n_labels": 5, "fmt": "%.2g"})
+# --------------------------------------------------------------------------------------------------------------- volume view
+def _block_mean(arr, stride, nan=False):
+    if stride == 1:
+        return arr
+    shape = [int(np.ceil(n / stride)) * stride for n in arr.shape]
+    pad = [(0, s - n) for s, n in zip(shape, arr.shape)]
+    a = np.pad(arr.astype(np.float32), pad, constant_values=np.nan if nan else 0)
+    a = a.reshape(shape[0] // stride, stride, shape[1] // stride, stride, shape[2] // stride, stride)
+    if nan:
+        with np.testing.suppress_warnings() as sup:
+            sup.filter(RuntimeWarning)
+            return np.nanmean(a, axis=(1, 3, 5))
+    return a.mean(axis=(1, 3, 5))
 
 
-def _iso_surface(pv, c, volume, level, sigma, smooth_iterations=25):
-    """Smooth closed iso-surface of a 3D array (padded, so that it is also closed at the border of the image)."""
-    vol = np.pad(ndimage.gaussian_filter(volume.astype(np.float32), sigma) if sigma else volume.astype(np.float32), 2)
-    grid = pv.ImageData(dimensions=vol.shape, spacing=tuple(float(s) for s in c.spacing), origin=tuple(float(o) for o in c.origin - 2 * c.spacing))
+def _downsampled(c, max_dim):
+    stride = max(1, int(np.ceil(max(c.anatomy.shape) / max_dim)))
+    anatomy = _block_mean(c.anatomy, stride)
+    brain = _block_mean(c.brain, stride) > 0.5
+    psc = _block_mean(c.psc, stride, nan=True)
+    spacing = c.spacing * stride
+    origin = np.array([c.world[a][0] for a in range(3)]) + (stride - 1) / 2 * c.spacing
+    return anatomy, brain, psc, spacing, origin
+
+
+def _build_volume(pv, c, atlas_opacity, alpha_max, strength, max_dim):
+    """One RGBA volume, composed like fusiVolumeRGBA ("overall" atlas opacity, clear PSC on)."""
+    tissue, brain, psc, spacing, origin = _downsampled(c, max_dim)
+    weight = brain * np.maximum(0.15, tissue)
+    path = max(float(weight.sum(axis=a).max()) for a in range(3))
+    at = 1 - (1 - min(1.0, atlas_opacity)) ** (weight / max(path, 1e-9))
+    tone = np.minimum(1, 1.5 * np.sqrt(np.maximum(0, tissue)))
+    rgb = np.stack([0.85 * tone, 0.90 * tone, 0.95 * tone], -1) * at[..., None]
+    alpha = at
+    prgb, ap = _transfer(c, psc, alpha_max, strength)
+    envelope = ndimage.gaussian_filter(ap, 1.0, mode="nearest")
+    attenuation = 1 - 0.8 * np.minimum(1, envelope / max(alpha_max, 1e-9))
+    rgb, alpha = rgb * attenuation[..., None], alpha * attenuation
+    rgb = rgb * (1 - ap[..., None]) + prgb * ap[..., None]
+    alpha = alpha * (1 - ap) + ap
+    rgb = np.clip(rgb / np.maximum(alpha, 1e-6)[..., None], 0, 1)
+    grid = pv.ImageData(dimensions=tissue.shape, spacing=tuple(float(s) for s in spacing), origin=tuple(float(o) for o in origin))
+    # 8 bit per channel; the opacity is stored as its cube root so that the tiny per-voxel opacity of the anatomy keeps its precision
+    rgba = np.concatenate([rgb, np.cbrt(np.clip(alpha, 0, 1))[..., None]], -1)
+    grid.point_data["rgba"] = np.round(rgba.reshape(-1, 4, order="F") * 255).astype(np.uint8)
+    return SimpleNamespace(grid=grid, spacing=spacing, bounds_brain=_brain_bounds(brain, spacing, origin))
+
+
+def _brain_bounds(brain, spacing, origin, n_points=20000):
+    """Points on the surface of the brain (for fitting the camera; the corners of the bounding box would fit too loosely)."""
+    edge = brain & ~ndimage.binary_erosion(brain)
+    idx = np.argwhere(edge if edge.any() else np.ones_like(brain))
+    if len(idx) > n_points:
+        idx = idx[np.random.default_rng(0).choice(len(idx), n_points, replace=False)]
+    return idx * spacing + origin
+
+
+def _add_volume(pl, vol):
+    import vtk
+    actor = pl.add_volume(vol.grid, scalars="rgba", mapper="fixed_point", show_scalar_bar=False)
+    # The CPU ray caster applies the opacity per voxel like MATLAB's volshow (the GPU mapper ignores the unit distance for RGBA data)
+    actor.mapper.SetAutoAdjustSampleDistances(0)
+    actor.mapper.SetImageSampleDistance(1.0)
+    actor.mapper.SetSampleDistance(float(vol.spacing.min()) / 2)
+    table = vtk.vtkPiecewiseFunction()
+    for code in range(256):
+        table.AddPoint(code, (code / 255) ** 3)
+    actor.prop.SetScalarOpacity(0, table)
+    actor.prop.SetScalarOpacityUnitDistance(float(vol.spacing.min()))
+    actor.prop.interpolation_type = "linear"
+    actor.prop.shade = False
+    return actor
+
+
+# -------------------------------------------------------------------------------------------------------------- surface view
+def _iso(pv, volume, level, spacing, origin, sigma, max_faces=60000):
+    vol = np.pad(ndimage.gaussian_filter(volume.astype(np.float32), sigma) if sigma else volume.astype(np.float32), 1)
+    grid = pv.ImageData(dimensions=vol.shape, spacing=tuple(float(s) for s in spacing), origin=tuple(float(o) for o in origin - spacing))
     grid.point_data["v"] = vol.ravel(order="F")
-    surf = grid.contour([level], scalars="v", method="marching_cubes").clean()
-    if surf.n_points == 0:
+    surf = grid.contour([level], scalars="v", method="marching_cubes").extract_surface(algorithm=None).clean()
+    if surf.n_cells == 0:
         return None
-    surf = surf.extract_surface(algorithm=None)
-    if smooth_iterations:
-        surf = surf.smooth_taubin(n_iter=smooth_iterations, pass_band=0.1)
-    return surf.compute_normals(point_normals=True, cell_normals=False, split_vertices=False)
+    if surf.n_cells > max_faces:
+        surf = surf.decimate(1 - max_faces / surf.n_cells)
+    return surf.smooth_taubin(n_iter=20, pass_band=0.1).compute_normals(split_vertices=False)
 
 
-def plot_slice_stack(map_file, underlay_file, out_file=None, *, view="stack", layout="tiled", axis="coronal", thickness=None, gap=2.0,
-                     azimuth=35.0, elevation=25.0, tile_view="paper oblique", n_slices=None, depth_gain=3.0, tile_gap=0.15, tile_rise=0.2,
-                     columns=None, reverse_order=False, slice_range=None, cover="data", threshold=0.0, vmax=None, cmap="autumn", alpha=1.0,
-                     alpha_min=0.55, alpha_max=1.0, projection="mean", brain_mask=None, under_threshold=0.02, upsample=3, flip_view=False,
-                     slice_labels=True, label_origin=0.0, label="", title="", colorbar=True, background="white", dpi=300, figsize=(9, 7),
-                     show=False, view_angle=25.0, outline=False, side_color="gray", edge_voxels=1.5, tissue_threshold=0.15,
-                     surface_levels=3, volume_opacity=1.0, interactive=False, view_file=None, movie_file=None, movie_seconds=8.0, movie_fps=20,
-                     _screenshot_instead=None):
-    """Draws the 3D figure and saves it to `out_file` (png/pdf/svg). Returns the matplotlib figure (None if only the viewer/movie are made).
+def _voxel_faces(pv, active, rgb, alpha, spacing, origin):
+    """Exposed faces of the active voxels, coloured per voxel (fusiVolumeVoxelFaces)."""
+    padded = np.pad(active, 1)
+    pts, cols = [], []
+    corner_sets = {0: [(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 1: [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)],
+                   2: [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]}
+    for axis in range(3):
+        for step in (-1, 1):
+            shift = [slice(1, -1)] * 3
+            shift[axis] = slice(1 + step, padded.shape[axis] - 1 + step)
+            idx = np.argwhere(active & ~padded[tuple(shift)])
+            if idx.size == 0:
+                continue
+            base = idx.astype(np.float32) - 0.5
+            base[:, axis] += 1.0 if step > 0 else 0.0
+            quad = np.stack([base + np.array(c_, dtype=np.float32) * (np.arange(3) != axis) for c_ in corner_sets[axis]], 1)
+            pts.append((quad * spacing + origin).reshape(-1, 3))
+            colour = np.concatenate([rgb[tuple(idx.T)], alpha[tuple(idx.T)][:, None]], 1)
+            cols.append(colour)
+    if not pts:
+        return None
+    pts = np.vstack(pts)
+    n = len(pts) // 4
+    mesh = pv.PolyData(pts, np.hstack([np.full((n, 1), 4), np.arange(n * 4).reshape(-1, 4)]).ravel())
+    mesh.cell_data["rgba"] = (np.clip(np.vstack(cols), 0, 1) * 255).astype(np.uint8)
+    return mesh
 
-    view            "stack" (slices), "volume" (volume rendering) or "surface" (surface rendering)
-    layout          stack only: "tiled" (default, flat tiles in rows, orthographic) or "physical" (slabs behind each other with gaps)
-    axis            slice direction: "coronal" (default), "sagittal" or "axial"; in the volume and surface views the direction the scene is seen from
-    n_slices        tiled: number of tiles (default 8), evenly spread over the range; physical: use only this many slabs
-    thickness       mm of atlas averaged for each slice (tiled: default = distance between the slices, at most 1; physical: 2.5)
-    slice_range     (start, end) in mm along the slice axis (atlas world coordinates); default: `cover`
-    cover           "data" = extent of the map (default), "brain" = whole brain
-    tile_view       tiled camera: "paper oblique" (default), "shallow oblique", "face-on" or "custom" (uses azimuth and elevation)
-    depth_gain      tiled: the slice thickness is exaggerated by this factor in the display, so the sides of the tiles are visible
-    tile_gap, tile_rise  tiled: space between the tiles as fraction of their width and the step down of each next tile in a row as fraction of its height
-    columns         tiled: tiles per row (default: automatic)
-    reverse_order   tiles in the other order
-    gap             physical: mm of empty space between the slabs
-    azimuth         degrees the camera is turned to the side (0 = looking straight onto the slices)
-    elevation       degrees the camera is raised above the slices
-    view_angle      perspective opening angle in degrees, 0 = parallel projection (not used by the tiled layout, which is always parallel)
-    threshold, vmax values <= threshold are not shown, vmax is the end of the colour scale (default: 99.5th percentile)
-    cmap            colormap of positive values (negative values, if present, are shown in cyan-blue)
-    alpha_min, alpha_max  opacity of the map just above the threshold and at vmax (weak values stay translucent so the anatomy shows through)
-    alpha           overall opacity factor of the map on the slices
-    projection      "mean" or "max" of the map over the slice thickness ("max" is the better choice for small effects)
-    flip_view       look at the slices from the other side
-    label_origin    mm that are subtracted from the slice positions in the labels (e.g. the y coordinate of bregma)
-    outline         thin dark line around the faces of the slices (off by default)
-    side_color      "gray" (default: sides in neutral tissue gray, shaded, with the map where it is active) or "anatomy"
-    tissue_threshold  the outline of a slab follows the tissue brighter than this fraction of the template's tissue range (0 = the brain
-                    mask as it is); removes the dark rim at the edge of the brain
-    edge_voxels     width (in voxels) of the border of the brain that takes the colour of the tissue next to it; hides the dark band of the
-                    template at the brain edge
-    surface_levels  surface view: number of nested iso-surfaces of the map
-    volume_opacity  volume view: factor for the opacity of the brain (1 = default, lower = more transparent)
-    interactive     open the scene in a window that can be rotated with the mouse (drag = rotate, scroll = zoom, shift + drag = pan,
-                    `s` = save the current view as PNG to `view_file`, `q` = close). The window blocks until it is closed. The figure
-                    file `out_file` is still written first if it is given (it may be omitted in this mode).
-    movie_file      write a video (.mp4): the tiled and physical stacks sway to both sides, the volume and surface views turn around once
+
+def _build_surface(pv, c, brain_opacity, alpha_max, strength, max_dim, surface_mode):
+    tissue, brain, psc, spacing, origin = _downsampled(c, max_dim)
+    brain_surface = _iso(pv, brain, 0.5, spacing, origin, 1.0)
+    rgb, ap = _transfer(c, psc, alpha_max, strength)
+    items = []
+    if surface_mode == "voxels":
+        mesh = _voxel_faces(pv, ap > 0, rgb, ap, spacing, origin)
+        if mesh is not None:
+            items.append(("voxels", mesh))
+    else:
+        for sign in ((1,) if c.sign == "positive" else (-1,) if c.sign == "negative" else (1, -1)):
+            v = np.nan_to_num(sign * psc)
+            peak = v.max()
+            if peak <= c.threshold:
+                continue
+            level = min(c.threshold + 0.35 * (c.vmax - c.threshold), (c.threshold + peak) / 2)
+            surf = _iso(pv, v, level, spacing, origin, 0.6)
+            if surf is not None:
+                col, a = _transfer(c, np.array([sign * level]), alpha_max, strength)
+                items.append(("contour", (surf, tuple(col[0]), float(a[0]))))
+    return SimpleNamespace(brain=brain_surface, brain_opacity=brain_opacity, items=items, bounds_brain=_brain_bounds(brain, spacing, origin))
+
+
+# ------------------------------------------------------------------------------------------------------------------ figure
+def plot_slice_stack(map_file, out_file=None, *, underlay_file=None, view="stack", axis="coronal", n_tiles=6, slab_slices=5,
+                     depth_gain=3.0, tile_gap=0.15, tile_rise=0.2, columns=None, stack_view="paper oblique", yaw=None, tilt=None,
+                     reverse_order=False, slice_range=None, cover="data", projection="mean", camera="oblique", azimuth=None, elevation=None,
+                     threshold=0.0, vmax=None, color_min=None, cmap="blackbdy", sign="positive", alpha_max=1.0, strength=5.0,
+                     atlas_opacity=0.8, brain_opacity=0.3, surface_mode="voxels", max_dim=180, upsample=2, brain_mask=None,
+                     coverage=None, slice_labels=True, label_origin=0.0, scale_bar_um=500, label="", title="", colorbar=True,
+                     background="black", dpi=300, figsize=(10, 6), interactive=False, view_file=None, movie_file=None,
+                     movie_seconds=8.0, movie_fps=20, show=False, _screenshot_instead=None):
+    """Draws the 3D figure and saves it to `out_file` (png/pdf/svg). Returns the matplotlib figure (None without `out_file`).
+
+    map_file        map in atlas space (e.g. roi_atlas_mouse/atlas_space/stim_tstat_atlasspace.nii.gz)
+    underlay_file   anatomy on the atlas grid; default: found from the analysis folder (mouse: Allen CCFv3 template)
+    view            "stack", "volume" or "surface"
+    axis            stack: slice direction "coronal" (default), "sagittal" or "axial"
+    n_tiles         stack: number of slabs, evenly spread over the extent of the data (or `slice_range` in atlas mm)
+    slab_slices     stack: atlas slices averaged per slab (5 x 50 µm = 250 µm for the Allen template)
+    projection      stack: map over the slab thickness, "mean" (default, as deConfUSIon) or "max" (largest magnitude; better for
+                    small or sparse responses, which the mean dilutes below the threshold)
+    depth_gain      stack: the slab thickness is shown this many times thicker (display only)
+    tile_gap, tile_rise  stack: space between the tiles (fraction of the width) and rise of each next tile (fraction of the height)
+    columns         stack: tiles per strip (default: one strip up to 6 tiles, otherwise automatic)
+    stack_view      stack camera: "paper oblique" (yaw -6°, tilt 8°), "shallow oblique", "face-on" or "custom" (`yaw`, `tilt`)
+    camera          volume / surface camera: "oblique", "dorsal", "coronal", "sagittal", "frontal oblique" or "custom"
+                    (`azimuth`, `elevation` in degrees: 0/0 = from the front, azimuth turns to the left, elevation from above)
+    threshold       |values| below are not shown; vmax: end of the colour scale (default: 99.5th percentile)
+    color_min       start of the colour scale (default 0; values below the threshold stay hidden)
+    cmap            colormap of positive values (default "blackbdy", FSLeyes blackbdy_iso; any matplotlib name)
+    sign            "positive" (default), "negative" or "both"
+    alpha_max, strength  opacity of the map: rises from the threshold to vmax up to alpha_max, square-root lifted, times strength
+    atlas_opacity   volume: opacity of the anatomy along the longest path through the brain
+    brain_opacity   surface: opacity of the brain surface
+    surface_mode    surface: "voxels" (unsmoothed voxels, exact colours) or "contour" (smooth surface at one level)
+    max_dim         volume / surface: the atlas is averaged down to at most this many voxels per axis
+    upsample        stack: in-plane enlargement of the tiles (smoother outlines)
+    coverage        image of the measured brain region in atlas space (default: brain_mask_atlasspace.nii.gz next to the map)
+    label_origin    mm subtracted from the slab positions in the labels (e.g. the position of bregma in the atlas)
+    interactive     open a window that can be rotated with the mouse (s = save the view as PNG, q = close)
+    movie_file      write a video (.mp4): the stack sways to both sides, volume and surface turn around once
     """
     pv = _pyvista()
     if view not in VIEWS:
         raise ValueError(f"view must be one of {VIEWS}")
-    if layout not in ("tiled", "physical"):
-        raise ValueError("layout must be 'tiled' or 'physical'")
-    tiled = view == "stack" and layout == "tiled"
-    c = _prepare(map_file, underlay_file, axis, flip_view, brain_mask, under_threshold, threshold, vmax, cmap)
-    vmax = c.vmax
-    c.centre = c.extent.mean(axis=1)
-    if tiled and tile_view != "custom":
-        azimuth, elevation = TILE_VIEWS[tile_view]
-    direction = _direction(c, azimuth, elevation)
-
-    bg = "white" if background == "transparent" else background
+    if underlay_file is None:
+        underlay_file, guessed_mask = find_anatomy(map_file)
+        if not underlay_file:
+            raise ValueError("No anatomy found for this map; give it with underlay_file / --underlay.")
+        brain_mask = brain_mask or guessed_mask or None
+    c = _prepare(map_file, underlay_file, brain_mask, coverage, threshold, vmax, color_min, cmap, sign)
+    bg = "black" if background == "transparent" else background
+    text_color = "black" if matplotlib.colors.rgb_to_hsv(matplotlib.colors.to_rgb(bg))[2] > 0.5 else "white"
     if c.negative:
-        bar_cmap, bar_limits = ListedColormap(np.vstack([NEG_CMAP(np.linspace(1, 0, 256)), c.cmap_pos(np.linspace(0, 1, 256))])), (-vmax, vmax)
+        bar_cmap = ListedColormap(np.vstack([NEG_CMAP(np.linspace(1, 0, 256)), c.cmap(np.linspace(0, 1, 256))]))
+        bar_limits = (-c.vmax, c.vmax)
     else:
-        bar_cmap, bar_limits = c.cmap_pos, (threshold, vmax)
-
-    scene = SimpleNamespace(parallel=False, sway=0.0, labels=[], caption="")
-    stack_options = dict(projection=projection, upsample=upsample, alpha=alpha, alpha_min=alpha_min, alpha_max=alpha_max, outline=outline,
-                         side_color=side_color, edge_voxels=edge_voxels, tissue_threshold=tissue_threshold, both_caps=interactive)
-    slabs, volume_items, surface_items = [], [], []
+        bar_cmap, bar_limits = (NEG_CMAP, (-c.vmax, -c.color_min)) if sign == "negative" else (c.cmap, (c.color_min, c.vmax))
+    aspect = figsize[0] / figsize[1]
 
     if view == "stack":
-        centers, thickness = _slab_centers(c, layout, thickness, gap, n_slices, slice_range, cover, reverse_order)
-        for center in centers:
-            slab = _build_slab(pv, c, center, thickness, direction, **stack_options)
-            if slab is not None:
-                slabs.append(slab)
-        if not slabs:
-            raise ValueError("No slab contains brain voxels.")
-        scene.sway = 25.0
-        if tiled:
-            r_axis, u_axis = int(np.argmax(np.abs(c.right))), int(np.argmax(np.abs(c.up)))
-            width, height = c.extent[r_axis][1] - c.extent[r_axis][0], c.extent[u_axis][1] - c.extent[u_axis][0]
-            n = len(slabs)
-            cols = int(columns) if columns else _tile_columns(n, width, height, tile_gap, tile_rise, figsize)
-            cols = max(1, min(cols, n))
-            row_step = height * (1.2 + (cols - 1) * tile_rise)
-            for i, slab in enumerate(slabs):
-                row, col = divmod(i, cols)
-                shift = (col * width * (1 + tile_gap), -row * row_step - col * tile_rise * height)
-                slab.caps = _place(slab.caps, c, slab.position, shift, depth_gain)
-                slab.body = _place(slab.body, c, slab.position, shift, depth_gain)
-                if slab.edge is not None:
-                    slab.edge = _place(slab.edge, c, slab.position, shift, depth_gain)
-                slab.shift = shift
-            scene.parallel = True
-            if slice_labels:
-                names = "xyz"[c.slice_axis]
-                scene.labels = [(f"{names} = {s.position - label_origin:+.1f} mm", s.shift, height) for s in slabs]
-        else:
-            scene.caption = f"{axis.capitalize()} slices at " + ", ".join(f"{s.position - label_origin:+.1f}" for s in slabs) + " mm"
-        for s in slabs:
-            s.caps_normals = s.caps
-            s.body = s.body.compute_normals(point_normals=True, cell_normals=False, split_vertices=False)
-        pts = _bounds_corners([m for s in slabs for m in (s.caps, s.body)])
-        if tiled and slice_labels:  # room for the labels below the tiles
-            below = np.array([c.right * s.shift[0] + c.up * (s.shift[1] - height * 0.75) for s in slabs])
-            pts = np.vstack([pts, below])
+        scene = _build_stack(pv, c, axis, int(n_tiles), int(slab_slices), depth_gain, tile_gap, tile_rise, columns, slice_range, cover,
+                             reverse_order, alpha_max, strength, int(upsample), aspect, projection)
+        if stack_view != "custom":
+            yaw, tilt = STACK_VIEWS[stack_view]
+        yaw, tilt = float(yaw or 0.0), float(tilt or 0.0)
+        pts = np.vstack([m.points for m in scene.meshes])
+        up = np.array([0.0, 1.0, 0.0])
     else:
-        pts = np.array([(x, y, z) for x in c.extent[0] for y in c.extent[1] for z in c.extent[2]])
-        gray = _gray(c, c.under) * c.mask
-        if view == "volume":
-            grid = pv.ImageData(dimensions=c.under.shape, spacing=tuple(float(s) for s in c.spacing), origin=tuple(float(o) for o in c.origin))
-            grid.point_data["anat"] = ndimage.gaussian_filter(gray, 0.6).ravel(order="F")
-            volume_items.append(("anat", grid))
-            frac_axis = np.linspace(0, 1, 100)  # (a table of exactly 256 entries is misread by pyvista)
-            c.table_anat = volume_opacity * 0.08 * np.clip((frac_axis - 0.2) / 0.8, 0, 1) ** 1.5
-            c.table_map = np.where(frac_axis > 0, _alpha_ramp(frac_axis, alpha_min, alpha_max), 0.0)
-            grid.point_data["pos"] = np.where(c.over > threshold, c.over, 0).ravel(order="F").astype(np.float32)
-            grid.point_data["neg"] = np.where(c.over < -threshold, -c.over, 0).ravel(order="F").astype(np.float32)
-            c.volume_grid = grid
+        built = _build_volume(pv, c, atlas_opacity, alpha_max, strength, max_dim) if view == "volume" else \
+            _build_surface(pv, c, brain_opacity, alpha_max, strength, max_dim, surface_mode)
+        pts = built.bounds_brain
+        up = np.array([0.0, 0.0, 1.0])
+    centre = (pts.min(0) + pts.max(0)) / 2
+    radius = float(np.linalg.norm(pts.max(0) - pts.min(0)) / 2)
+
+    def direction_for(turn):
+        """Unit vector from the scene to the camera; `turn` (degrees) rotates it about the vertical axis (movie)."""
+        if view == "stack":
+            y, t = np.radians(yaw + turn), np.radians(tilt)
+            return np.array([np.sin(y) * np.cos(t), np.sin(t), np.cos(y) * np.cos(t)])  # camera on the +z side: +x right, +y up
+        if camera == "custom":
+            az, el = np.radians(float(azimuth or 0.0) + turn), np.radians(float(elevation or 0.0))
+            d = np.array([-np.sin(az) * np.cos(el), np.cos(az) * np.cos(el), np.sin(el)])
         else:
-            closed = ndimage.binary_fill_holes(ndimage.binary_closing(np.pad(c.mask, 3), iterations=3))[3:-3, 3:-3, 3:-3]
-            c.brain_surface = _iso_surface(pv, c, closed.astype(np.float32), 0.5, 1.0, 30)
-            levels = threshold + (vmax - threshold) * np.arange(max(surface_levels, 1)) / max(surface_levels, 1)
-            for sign, cm in ((1, c.cmap_pos), (-1, NEG_CMAP)):
-                for k, level in enumerate(levels):
-                    surf = _iso_surface(pv, c, np.maximum(sign * c.over, 0), level + 1e-6 * vmax, 0.7)
-                    if surf is not None:
-                        opacity = 0.5 + 0.5 * k / max(len(levels) - 1, 1)
-                        surface_items.append((surf, tuple(cm((level - threshold) / max(vmax - threshold, 1e-9))[:3]), opacity))
-        scene.sway = 0.0
+            d = np.array(CAMERA_PRESETS[camera], dtype=float)
+            if turn:
+                r = np.radians(turn)
+                d = np.array([d[0] * np.cos(r) - d[1] * np.sin(r), d[0] * np.sin(r) + d[1] * np.cos(r), d[2]])
+        return d / np.linalg.norm(d)
 
-    centre3 = (pts.min(axis=0) + pts.max(axis=0)) / 2
-    radius = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)) / 2)
-    scene.focal, scene.radius = centre3, radius
+    def screen_axes(d):
+        right = np.cross(-d, up)
+        if np.linalg.norm(right) < 1e-6:  # looking along the up direction
+            right = np.cross(-d, np.array([0.0, 1.0, 0.0]))
+        right /= np.linalg.norm(right)
+        return right, np.cross(right, -d)
 
-    def fit_orthographic(angles, aspect):
-        """Camera scale and centre so that the tiles fill the picture, for each azimuth in `angles`."""
+    def fit(turns, aspect_ratio):
         half_w = half_h = 0.0
-        for az in angles:
-            right_c, up_c = _basis(c, _direction(c, az, elevation))
-            x, y = (pts - centre3) @ right_c, (pts - centre3) @ up_c
-            half_w, half_h = max(half_w, (x.max() - x.min()) / 2), max(half_h, (y.max() - y.min()) / 2)
-        return max(half_h, half_w / aspect) * 1.04, half_w, half_h
+        for t in turns:
+            right, scr_up = screen_axes(direction_for(t))
+            x, y = (pts - centre) @ right, (pts - centre) @ scr_up
+            half_w = max(half_w, np.abs(x).max())
+            half_h = max(half_h, np.abs(y).max())
+        return max(half_h, half_w / aspect_ratio) * 1.06
 
-    def set_camera(pl, az, aspect, parallel_scale=None):
-        d = _direction(c, az, elevation)
-        if scene.parallel:
-            pl.camera.parallel_projection = True
-            distance = 4 * radius
-            pl.camera.parallel_scale = parallel_scale
-        elif view_angle and view_angle > 0:
-            pl.camera.view_angle = float(view_angle)
-            distance = 0.8 * radius / np.sin(np.radians(view_angle) / 2)  # the box diagonal is larger than the brain
-        else:
-            pl.camera.parallel_projection = True
-            pl.camera.parallel_scale = radius * 1.05 / min(1.0, aspect)
-            distance = 4 * radius
-        pl.camera.focal_point = tuple(scene.focal)
-        pl.camera.position = tuple(scene.focal + d * distance)
-        pl.camera.up = tuple(c.up)
-        pl.camera.clipping_range = (max(distance - 2 * radius, 1e-3), distance + 2 * radius)
+    def set_camera(pl, turn, scale, bar_margin=0.0):
+        """bar_margin: share of the window width kept free on the right for the colorbar of the 3D window."""
+        d = direction_for(turn)
+        right, scr_up = screen_axes(d)
+        width = 2 * scale * pl.window_size[0] / pl.window_size[1]
+        focal = centre + right * bar_margin / 2 * width
+        pl.camera.parallel_projection = True
+        pl.camera.focal_point = tuple(focal)
+        pl.camera.position = tuple(focal + d * 4 * radius)
+        pl.camera.up = tuple(scr_up)
+        pl.camera.parallel_scale = scale
+        pl.camera.clipping_range = (0.5 * radius, 8 * radius)
 
-    def build_plotter(off_screen, size, antialiasing, line_scale):
+    def build_plotter(off_screen, size):
         pl = pv.Plotter(off_screen=off_screen, window_size=list(size), lighting="none")
         pl.set_background(bg)
         if view == "stack":
-            for slab in slabs:
-                pl.add_mesh(slab.caps, scalars="color", rgb=True, lighting=False, show_scalar_bar=False)
-                pl.add_mesh(slab.body, scalars="color", rgb=True, smooth_shading=True, ambient=0.45, diffuse=0.75, specular=0.08, specular_power=15,
-                            show_scalar_bar=False)
-                if slab.edge is not None and slab.edge.n_points:
-                    pl.add_mesh(slab.edge, color=tuple(EDGE_COLOR), line_width=max(1.0, line_scale), render_lines_as_tubes=True, lighting=False)
+            for mesh in scene.meshes:
+                pl.add_mesh(mesh, scalars="rgb", rgb=True, lighting=False, show_scalar_bar=False, preference="cell")
+            if scale_bar_um:
+                x1, y1 = scene.scale_anchor
+                bar = pv.Line((x1 - scale_bar_um / 1000, y1, 0), (x1, y1, 0))
+                pl.add_mesh(bar, color=text_color, line_width=3, lighting=False)
         elif view == "volume":
-            pl.add_volume(c.volume_grid, scalars="anat", cmap="gray", opacity=c.table_anat, clim=(0, 1), show_scalar_bar=False, mapper="gpu")
-            for key, cm in (("pos", c.cmap_pos), ("neg", NEG_CMAP)):
-                if c.volume_grid.point_data[key].max() > 0:
-                    pl.add_volume(c.volume_grid, scalars=key, cmap=cm, opacity=c.table_map, clim=(threshold, vmax), show_scalar_bar=False,
-                                  mapper="gpu")
+            _add_volume(pl, built)
         else:
-            pl.enable_depth_peeling(number_of_peels=12, occlusion_ratio=0.0)
-            if c.brain_surface is not None:
-                pl.add_mesh(c.brain_surface, color=(0.5, 0.54, 0.62), opacity=0.22, smooth_shading=True, ambient=0.35, diffuse=0.7,
-                            specular=0.15, specular_power=20, show_scalar_bar=False, culling="back")
-            for surf, color, opacity in surface_items:
-                pl.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True, ambient=0.35, diffuse=0.75, specular=0.3, specular_power=25,
-                            show_scalar_bar=False)
-        pl.add_light(pv.Light(light_type="headlight", intensity=0.55))
-        pl.add_light(pv.Light(position=(-1.0, 1.2, 1.0), focal_point=(0, 0, 0), light_type="camera light", intensity=0.45))
-        pl.enable_anti_aliasing(antialiasing)
+            pl.enable_depth_peeling(number_of_peels=16, occlusion_ratio=0.0)
+            if built.brain is not None:
+                pl.add_mesh(built.brain, color=(0.75, 0.78, 0.82), opacity=built.brain_opacity, smooth_shading=True, ambient=0.3,
+                            diffuse=0.7, specular=0.1, show_scalar_bar=False)
+            for kind, item in built.items:
+                if kind == "voxels":
+                    pl.add_mesh(item, scalars="rgba", rgba=True, lighting=False, show_scalar_bar=False, preference="cell")
+                else:
+                    surf, colour, opacity = item
+                    pl.add_mesh(surf, color=colour, opacity=opacity, smooth_shading=True, ambient=0.35, diffuse=0.75, show_scalar_bar=False)
+            pl.add_light(pv.Light(light_type="headlight", intensity=1.0))
         return pl
 
-    text_color = "black" if matplotlib.colors.rgb_to_hsv(matplotlib.colors.to_rgb(bg))[2] > 0.5 else "white"
-
-    def decorate(pl):
-        _add_scalar_bar(pl, pv, bar_cmap, bar_limits, label, text_color, scene.focal)
-        if title:
-            pl.add_text(title, position="upper_edge", font_size=12, color=text_color)
-        if scene.caption:
-            pl.add_text(scene.caption, position="lower_edge", font_size=9, color=text_color)
+    def label_text(position, thickness):
+        return f"{position - label_origin:+.2f} mm | {thickness * 1000:.0f} µm"
 
     fig = None
     if out_file is not None or not (interactive or movie_file):
-        window = int(np.clip(max(figsize) * dpi, 600, 3600 if view == "stack" else 2400))
-        aspect = figsize[0] / figsize[1]
-        if scene.parallel:
-            _, half_w, half_h = fit_orthographic([azimuth], 1.0)
-            right_c, up_c = _basis(c, direction)
-            x, y = (pts - centre3) @ right_c, (pts - centre3) @ up_c
-            scene.focal = centre3 + right_c * (x.max() + x.min()) / 2 + up_c * (y.max() + y.min()) / 2  # centre of what is seen
-            aspect = max(half_w / max(half_h, 1e-9), 0.3)
-            scale = half_h * 1.04
-            size = (window, int(window / aspect))
-            if size[1] > window:
-                size = (int(window * aspect), window)
-        else:
-            size = (window, int(window / aspect))
-        pl = build_plotter(True, size, "ssaa" if view != "volume" else "fxaa", window / 1500)
-        set_camera(pl, azimuth, size[0] / size[1], scale if scene.parallel else None)
+        window = int(np.clip(max(figsize) * dpi, 800, 3000))
+        size = (window, int(window / aspect)) if aspect >= 1 else (int(window * aspect), window)
+        scale = fit([0.0], size[0] / size[1])
+        pl = build_plotter(True, size)
+        set_camera(pl, 0.0, scale)
+        if view == "stack":
+            pl.enable_anti_aliasing("ssaa")
         image = pl.screenshot(return_img=True, transparent_background=background == "transparent")
         pl.close()
-        scene.focal_static, scene.focal = scene.focal, centre3
-        figure_labels = []
-        if scene.labels:
-            right_c, up_c = _basis(c, direction)
-            pixels_per_mm = size[1] / (2 * scale)
-            for text, shift, tile_height in scene.labels:
-                anchor = c.right * shift[0] + c.up * (shift[1] - tile_height * 0.58) - scene.focal_static
-                figure_labels.append((text, size[0] / 2 + (anchor @ right_c) * pixels_per_mm, size[1] / 2 - (anchor @ up_c) * pixels_per_mm))
+        px_per_mm = size[1] / (2 * scale)
+        right, scr_up = screen_axes(direction_for(0.0))
 
-        # ---- crop to the content and add colorbar, labels and title with matplotlib
+        def to_pixels(p):
+            v = np.asarray(p) - centre
+            return size[0] / 2 + (v @ right) * px_per_mm, size[1] / 2 - (v @ scr_up) * px_per_mm
+
+        texts = []
+        if view == "stack" and slice_labels:
+            texts += [(label_text(pos, th), *to_pixels(anchor), "center") for pos, th, anchor in scene.labels]
+        if view == "stack" and scale_bar_um:
+            x1, y1 = scene.scale_anchor
+            texts.append((f"{scale_bar_um:g} µm", *to_pixels((x1, y1 + scene.height * 0.1, 0)), "right"))
+        # crop to the content
         background_rgb = np.array(matplotlib.colors.to_rgb(bg))
-        if image.shape[2] == 4:
-            content = image[..., 3] > 8
-        else:
-            content = np.any(np.abs(image[..., :3] / 255.0 - background_rgb) > 0.02, axis=2)
-        for _, px, py in figure_labels:  # labels belong to the content
-            content[int(np.clip(py + 0.04 * size[1], 0, size[1] - 1)), int(np.clip(px, 0, size[0] - 1))] = True
-        rows, cols_ = np.where(content)
-        margin = int(0.04 * max(image.shape[:2]))
-        y0, y1 = max(rows.min() - margin, 0), min(rows.max() + margin, image.shape[0])
-        x0, x1 = max(cols_.min() - margin, 0), min(cols_.max() + margin, image.shape[1])
-        cropped = image[y0:y1, x0:x1]
+        content = image[..., 3] > 8 if image.shape[2] == 4 else np.any(np.abs(image[..., :3] / 255.0 - background_rgb) > 0.03, axis=2)
+        for _, px, py, _ in texts:
+            content[int(np.clip(py, 0, size[1] - 1)), int(np.clip(px, 0, size[0] - 1))] = True
+        rows, cols = np.where(content)
+        margin = int(0.03 * max(image.shape[:2]))
+        y0, y1_ = max(rows.min() - margin, 0), min(rows.max() + margin, image.shape[0])
+        x0, x1_ = max(cols.min() - margin, 0), min(cols.max() + margin, image.shape[1])
+        cropped = image[y0:y1_, x0:x1_]
 
-        width_in = figsize[0] * (0.84 if colorbar else 0.96)
+        width_in = figsize[0] * (0.86 if colorbar else 0.98)
         height_in = width_in * cropped.shape[0] / cropped.shape[1]
-        top, bottom = (0.45 if title else 0.08), (0.4 if scene.caption else 0.08)
-        fig_w, fig_h = figsize[0], height_in + top + bottom
-        fig = plt.figure(figsize=(fig_w, fig_h), facecolor="none" if background == "transparent" else background)
-        ax = fig.add_axes([0.02, bottom / fig_h, width_in / fig_w, height_in / fig_h])
+        top = 0.45 if title else 0.05
+        fig_w, fig_h = figsize[0], height_in + top + 0.05
+        face = "none" if background == "transparent" else bg
+        fig = plt.figure(figsize=(fig_w, fig_h), facecolor=face)
+        ax = fig.add_axes([0.01, 0.05 / fig_h, width_in / fig_w, height_in / fig_h])
         ax.imshow(cropped, interpolation="lanczos", extent=(0, cropped.shape[1], cropped.shape[0], 0))
         ax.axis("off")
-        font_px = cropped.shape[1] / (width_in * 72)  # pixels per point
-        for text, px, py in figure_labels:
-            ax.text(px - x0, py - y0, text, ha="center", va="top", fontsize=7, color=text_color)
-        if scene.caption:
-            fig.text(0.5, 0.12 / fig_h, scene.caption, ha="center", va="bottom", fontsize=9)
+        for text, px, py, ha in texts:
+            ax.text(px - x0, py - y0, text, ha=ha, va="center", fontsize=7, color=text_color)
         if title:
-            fig.text(0.5, 1 - 0.1 / fig_h, title, ha="center", va="top", fontsize=11)
+            fig.text(0.5, 1 - 0.1 / fig_h, title, ha="center", va="top", fontsize=11, color=text_color)
         if colorbar:
-            mappable = ScalarMappable(Normalize(*bar_limits), bar_cmap)
-            cax = fig.add_axes([0.90, bottom / fig_h + 0.25 * height_in / fig_h, 0.018, 0.5 * height_in / fig_h])
-            cbar = fig.colorbar(mappable, cax=cax)
-            cbar.set_label(label)
+            cax = fig.add_axes([0.905, 0.05 / fig_h + 0.25 * height_in / fig_h, 0.016, 0.5 * height_in / fig_h])
+            cbar = fig.colorbar(ScalarMappable(Normalize(*bar_limits), bar_cmap), cax=cax)
+            cbar.set_label(label, color=text_color)
+            cbar.ax.tick_params(colors=text_color, labelsize=8)
+            cbar.outline.set_edgecolor(text_color)
         if out_file:
             Path(out_file).parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(out_file, dpi=dpi, transparent=background == "transparent")
-            what = f"{len(slabs)} slices" if view == "stack" else view
-            print(f"[OK] Figure saved: {out_file}  ({view}, {what})")
+            fig.savefig(out_file, dpi=dpi, facecolor=face, transparent=background == "transparent")
+            print(f"[OK] Figure saved: {out_file}  ({view})")
 
     if movie_file:
         movie_size = (1280, 720)
         frames = max(int(movie_seconds * movie_fps), 2)
-        if scene.sway:
-            angles = azimuth + scene.sway * np.sin(2 * np.pi * np.arange(frames) / frames)
-        else:
-            angles = azimuth + 360.0 * np.arange(frames) / frames
-        scale_movie = None
-        if scene.parallel:
-            scale_movie = fit_orthographic(np.linspace(azimuth - scene.sway, azimuth + scene.sway, 9), movie_size[0] / movie_size[1])[0]
-        pl = build_plotter(True, movie_size, "fxaa" if view == "volume" else "ssaa", 1.0)
-        decorate(pl)
+        steps = np.arange(frames) / frames
+        turns = 15.0 * np.sin(2 * np.pi * steps) if view == "stack" else 360.0 * steps
+        scale = fit(np.linspace(turns.min(), turns.max(), 13), 0.84 * movie_size[0] / movie_size[1])
+        pl = build_plotter(True, movie_size)
+        if view == "stack":
+            pl.enable_anti_aliasing("fxaa")
+        _add_window_decorations(pl, pv, bar_cmap, bar_limits, label, title, text_color, centre)
         Path(movie_file).parent.mkdir(parents=True, exist_ok=True)
         pl.open_movie(str(movie_file), framerate=int(movie_fps), quality=8)
-        for az in angles:
-            set_camera(pl, float(az), movie_size[0] / movie_size[1], scale_movie)
+        for turn in turns:
+            set_camera(pl, float(turn), scale, bar_margin=0.16)
             pl.write_frame()
         pl.close()
         print(f"[OK] Movie saved: {movie_file}  ({frames} frames)")
 
     if interactive:
-        save_to = Path(view_file) if view_file else (Path(out_file).with_name(Path(out_file).stem + "_view.png") if out_file else Path("slice_stack_view.png"))
-        size = (1400, 1000)
-        pl = build_plotter(_screenshot_instead is not None, size, "msaa", 1.5)
-        decorate(pl)
-        scale_view = fit_orthographic([azimuth], size[0] / size[1])[0] if scene.parallel else None
-        set_camera(pl, azimuth, size[0] / size[1], scale_view)
-        pl.add_text("drag: rotate   scroll: zoom   shift+drag: move   s: save view as PNG   q: close", position="upper_left", font_size=7, color=text_color)
+        save_to = Path(view_file) if view_file else (Path(out_file).with_name(Path(out_file).stem + "_view.png") if out_file else Path("brain3d_view.png"))
+        size = (1400, 900)
+        pl = build_plotter(_screenshot_instead is not None, size)
+        _add_window_decorations(pl, pv, bar_cmap, bar_limits, label, title, text_color, centre)
+        if view == "stack" and slice_labels:
+            pl.add_point_labels(np.array([a for _, _, a in scene.labels]), [label_text(p, t) for p, t, _ in scene.labels], font_size=11,
+                                text_color=text_color, shape=None, show_points=False, always_visible=True)
+        set_camera(pl, 0.0, fit([0.0], 0.84 * size[0] / size[1]), bar_margin=0.16)
+        pl.add_text("drag: rotate   scroll: zoom   shift+drag: move   s: save view as PNG   q: close", position="upper_left", font_size=7,
+                    color=text_color)
 
         def save_view():
             save_to.parent.mkdir(parents=True, exist_ok=True)
@@ -627,7 +680,7 @@ def plot_slice_stack(map_file, underlay_file, out_file=None, *, view="stack", la
             print(f"[OK] View saved: {save_to}")
 
         pl.add_key_event("s", save_view)
-        if _screenshot_instead is not None:  # test mode: no window, one picture
+        if _screenshot_instead is not None:
             pl.screenshot(str(_screenshot_instead))
             pl.close()
         else:
@@ -638,14 +691,18 @@ def plot_slice_stack(map_file, underlay_file, out_file=None, *, view="stack", la
     return fig
 
 
-def _guess_underlay(map_file):
-    for folder in list(Path(map_file).resolve().parents)[:3]:
-        found = sorted(folder.glob("template_registration_*mm.nii.gz"))
-        if found:
-            return str(found[0])
-    return ""
+def _add_window_decorations(pl, pv, bar_cmap, bar_limits, label, title, text_color, anchor):
+    """Colorbar and title inside the 3D window (an invisible point carries the colour scale)."""
+    marker = pv.PolyData(np.array([anchor]))
+    marker["scale"] = np.array([bar_limits[0]])
+    pl.add_mesh(marker, scalars="scale", cmap=bar_cmap, clim=bar_limits, opacity=0.0, show_scalar_bar=True,
+                scalar_bar_args={"title": label or " ", "vertical": True, "position_x": 0.9, "position_y": 0.25, "height": 0.5, "width": 0.04,
+                                 "color": text_color, "n_labels": 5, "fmt": "%.2g"})
+    if title:
+        pl.add_text(title, position="upper_edge", font_size=12, color=text_color)
 
 
+# --------------------------------------------------------------------------------------------------------------------- form
 def _open_file(path):
     if sys.platform == "darwin":
         subprocess.run(["open", str(path)])
@@ -655,47 +712,52 @@ def _open_file(path):
         subprocess.run(["xdg-open", str(path)])
 
 
-# (key, label, default, kind, choices): "file" fields get a Browse button, "choice" a drop-down, "check" a checkbox, "section" is a heading
+# (key, label, default, kind, choices): "file" fields get a Browse button, "choice" a drop-down, "check" a checkbox, "section" a heading
 GUI_FIELDS = [
     ("map", "Map in atlas space (.nii/.nii.gz)", "", "file", None),
-    ("underlay", "Atlas template (same grid as the map)", "", "file", None),
+    ("underlay", "Anatomy (empty = automatic: Allen template for mouse)", "", "file", None),
     ("out", "Output image (.png/.pdf/.svg)", "", "save", None),
-    ("view", "View", "stack", "choice", ["stack", "volume", "surface"]),
-    ("_s1", "Slices (View = stack)", "", "section", None),
-    ("layout", "Layout (tiled = flat tiles in rows, physical = slabs behind each other)", "tiled", "choice", ["tiled", "physical"]),
-    ("axis", "Slice direction (also the viewing direction of volume / surface)", "coronal", "choice", list(AXES)),
-    ("n_slices", "Number of slices (tiled: default 8; physical: max., empty = automatic)", "", "text", None),
-    ("thickness", "Slice thickness (mm, empty = automatic)", "", "text", None),
-    ("depth_gain", "Tiled: exaggerate the thickness (x)", "3", "text", None),
-    ("tile_gap", "Tiled: space between tiles (fraction of width)", "0.15", "text", None),
-    ("tile_rise", "Tiled: step down of each tile in a row (fraction of height)", "0.2", "text", None),
-    ("columns", "Tiled: tiles per row (empty = automatic)", "", "text", None),
-    ("gap", "Physical: gap between slabs (mm)", "2.0", "text", None),
-    ("projection", "Map over slice thickness (max for small effects)", "mean", "choice", ["mean", "max"]),
-    ("cover", "Slices cover", "data", "choice", ["data", "brain"]),
-    ("range_start", "Range start (mm, empty = automatic)", "", "text", None),
-    ("range_end", "Range end (mm, empty = automatic)", "", "text", None),
-    ("reverse_order", "Reverse the order of the slices", False, "check", None),
-    ("slice_labels", "Show slice position labels", True, "check", None),
-    ("label_origin", "Slice labels: subtract (mm, e.g. bregma)", "0", "text", None),
-    ("_s2", "Camera", "", "section", None),
-    ("tile_view", "Tiled camera", "paper oblique", "choice", ["paper oblique", "shallow oblique", "face-on", "custom"]),
-    ("azimuth", "Turn to the side (deg; physical, volume, surface, custom)", "35", "text", None),
-    ("elevation", "Raise above the slices (deg)", "25", "text", None),
-    ("view_angle", "Perspective angle (deg, 0 = none)", "25", "text", None),
-    ("flip_view", "View from the other side", False, "check", None),
-    ("_s3", "Map and colours", "", "section", None),
-    ("threshold", "Threshold (values below are hidden)", "0", "text", None),
+    ("view", "View", "stack", "choice", list(VIEWS)),
+    ("_s1", "Slice stack", "", "section", None),
+    ("axis", "Slice direction", "coronal", "choice", list(AXES)),
+    ("n_tiles", "Number of slabs", "6", "text", None),
+    ("slab_slices", "Atlas slices per slab (5 x 50 µm = 250 µm)", "5", "text", None),
+    ("depth_gain", "Show the slabs this many times thicker", "3", "text", None),
+    ("tile_gap", "Gap between slabs (fraction of width)", "0.15", "text", None),
+    ("tile_rise", "Rise of each next slab (fraction of height)", "0.2", "text", None),
+    ("columns", "Slabs per strip (empty = automatic)", "", "text", None),
+    ("stack_view", "Camera", "paper oblique", "choice", list(STACK_VIEWS) + ["custom"]),
+    ("yaw", "Custom camera: yaw (deg)", "-6", "text", None),
+    ("tilt", "Custom camera: tilt (deg)", "8", "text", None),
+    ("projection", "Map over the slab (max for small or sparse effects)", "mean", "choice", ["mean", "max"]),
+    ("cover", "Slabs cover", "data", "choice", ["data", "brain"]),
+    ("range_start", "Range start (atlas mm, empty = automatic)", "", "text", None),
+    ("range_end", "Range end (atlas mm, empty = automatic)", "", "text", None),
+    ("reverse_order", "Reverse the order of the slabs", False, "check", None),
+    ("slice_labels", "Show slab position labels", True, "check", None),
+    ("label_origin", "Labels: subtract (mm, e.g. bregma)", "0", "text", None),
+    ("scale_bar_um", "Scale bar (µm, 0 = none)", "500", "text", None),
+    ("_s2", "Volume / surface", "", "section", None),
+    ("camera", "Camera", "oblique", "choice", list(CAMERA_PRESETS) + ["custom"]),
+    ("azimuth", "Custom camera: azimuth (deg)", "-35", "text", None),
+    ("elevation", "Custom camera: elevation (deg)", "35", "text", None),
+    ("atlas_opacity", "Volume: anatomy opacity (0-1)", "0.8", "text", None),
+    ("brain_opacity", "Surface: brain opacity (0-1)", "0.3", "text", None),
+    ("surface_mode", "Surface: map as", "voxels", "choice", ["voxels", "contour"]),
+    ("_s3", "Map", "", "section", None),
+    ("threshold", "Threshold (|values| below are hidden)", "0", "text", None),
     ("vmax", "Colour scale maximum (empty = automatic)", "", "text", None),
-    ("cmap", "Colormap (matplotlib name)", "autumn", "text", None),
-    ("alpha_min", "Opacity of weak values (0-1)", "0.55", "text", None),
-    ("surface_levels", "Surface: number of nested surfaces", "3", "text", None),
-    ("volume_opacity", "Volume: brain opacity factor", "1", "text", None),
-    ("brain_mask", "Brain mask (optional)", "", "file", None),
+    ("color_min", "Colour scale minimum (empty = 0)", "", "text", None),
+    ("cmap", "Colormap (blackbdy or a matplotlib name)", "blackbdy", "text", None),
+    ("sign", "Values shown", "positive", "choice", ["positive", "negative", "both"]),
+    ("strength", "Map opacity strength", "5", "text", None),
+    ("alpha_max", "Map opacity maximum (0-1)", "1", "text", None),
+    ("brain_mask", "Brain mask (empty = automatic)", "", "file", None),
+    ("coverage", "Measured region (empty = brain_mask_atlasspace next to the map)", "", "file", None),
     ("label", "Colorbar label", "", "text", None),
     ("title", "Title", "", "text", None),
     ("colorbar", "Show colorbar", True, "check", None),
-    ("transparent", "Transparent background", False, "check", None),
+    ("background", "Background", "black", "choice", ["black", "white", "transparent"]),
     ("dpi", "Resolution (dpi)", "300", "text", None),
     ("_s4", "Output", "", "section", None),
     ("interactive", "Also open an interactive 3D viewer (rotate with the mouse)", True, "check", None),
@@ -716,29 +778,28 @@ def _gui_values_to_kwargs(v):
         except ValueError:
             raise ValueError(f"'{key}' must be a number, got '{text}'") from None
 
-    for key, name in (("map", "map"), ("underlay", "atlas template"), ("out", "output file")):
+    for key, name in (("map", "map"), ("out", "output file")):
         if not str(v[key]).strip():
             raise ValueError(f"Please select the {name}.")
-    for key in ("map", "underlay"):
-        if not Path(v[key]).is_file():
+    for key in ("map", "underlay", "brain_mask", "coverage"):
+        if str(v[key]).strip() and not Path(v[key]).is_file():
             raise ValueError(f"File not found: {v[key]}")
-    if v["brain_mask"].strip() and not Path(v["brain_mask"]).is_file():
-        raise ValueError(f"File not found: {v['brain_mask']}")
     start, end = number("range_start", optional=True), number("range_end", optional=True)
     if (start is None) != (end is None):
         raise ValueError("Enter both range start and range end, or leave both empty.")
     out = Path(v["out"])
     return dict(
-        map_file=v["map"], underlay_file=v["underlay"], out_file=v["out"], view=v["view"], layout=v["layout"], axis=v["axis"],
-        thickness=number("thickness", optional=True), gap=number("gap"), azimuth=number("azimuth"), elevation=number("elevation"),
-        view_angle=number("view_angle"), tile_view=v["tile_view"], n_slices=number("n_slices", int, optional=True),
-        depth_gain=number("depth_gain"), tile_gap=number("tile_gap"), tile_rise=number("tile_rise"), columns=number("columns", int, optional=True),
-        reverse_order=bool(v["reverse_order"]), slice_range=None if start is None else (start, end), cover=v["cover"],
-        threshold=number("threshold"), vmax=number("vmax", optional=True), cmap=v["cmap"].strip() or "autumn", alpha_min=number("alpha_min"),
-        surface_levels=number("surface_levels", int), volume_opacity=number("volume_opacity"), projection=v["projection"],
-        brain_mask=v["brain_mask"].strip() or None, flip_view=bool(v["flip_view"]), slice_labels=bool(v["slice_labels"]),
-        label_origin=number("label_origin"), label=v["label"], title=v["title"], colorbar=bool(v["colorbar"]),
-        background="transparent" if v["transparent"] else "white", dpi=number("dpi", int),
+        map_file=v["map"], out_file=v["out"], underlay_file=v["underlay"].strip() or None, view=v["view"], axis=v["axis"],
+        n_tiles=number("n_tiles", int), slab_slices=number("slab_slices", int), depth_gain=number("depth_gain"),
+        tile_gap=number("tile_gap"), tile_rise=number("tile_rise"), columns=number("columns", int, optional=True),
+        stack_view=v["stack_view"], yaw=number("yaw"), tilt=number("tilt"), cover=v["cover"], projection=v["projection"],
+        slice_range=None if start is None else (start, end), reverse_order=bool(v["reverse_order"]), slice_labels=bool(v["slice_labels"]),
+        label_origin=number("label_origin"), scale_bar_um=number("scale_bar_um"), camera=v["camera"], azimuth=number("azimuth"),
+        elevation=number("elevation"), atlas_opacity=number("atlas_opacity"), brain_opacity=number("brain_opacity"),
+        surface_mode=v["surface_mode"], threshold=number("threshold"), vmax=number("vmax", optional=True),
+        color_min=number("color_min", optional=True), cmap=v["cmap"].strip() or "blackbdy", sign=v["sign"], strength=number("strength"),
+        alpha_max=number("alpha_max"), brain_mask=v["brain_mask"].strip() or None, coverage=v["coverage"].strip() or None,
+        label=v["label"], title=v["title"], colorbar=bool(v["colorbar"]), background=v["background"], dpi=number("dpi", int),
         movie_file=str(out.with_suffix(".mp4")) if v["movie"] else None, movie_seconds=number("movie_seconds"))
 
 
@@ -759,7 +820,6 @@ def run_gui():
     root.title("Brain 3D plot")
     root.attributes("-topmost", True)
     root.after(500, lambda: root.attributes("-topmost", False))
-    # scrollable form (it has many rows), the buttons below stay visible
     canvas = tk.Canvas(root, highlightthickness=0)
     scrollbar = ttk.Scrollbar(root, orient="vertical", command=canvas.yview)
     canvas.configure(yscrollcommand=scrollbar.set)
@@ -791,22 +851,20 @@ def run_gui():
             variables[key] = tk.BooleanVar(value=bool(value))
             ttk.Checkbutton(frame, text=label, variable=variables[key]).grid(row=row, column=1, sticky="w", pady=1)
             continue
+        if kind == "choice" and value not in choices:
+            value = default
         variables[key] = tk.StringVar(value=str(value))
         ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=1)
         if kind == "choice":
-            ttk.Combobox(frame, textvariable=variables[key], values=choices, state="readonly", width=14).grid(row=row, column=1, sticky="w")
+            ttk.Combobox(frame, textvariable=variables[key], values=choices, state="readonly", width=16).grid(row=row, column=1, sticky="w")
         else:
-            ttk.Entry(frame, textvariable=variables[key], width=70 if kind in ("file", "save") else 14).grid(row=row, column=1, sticky="w")
+            ttk.Entry(frame, textvariable=variables[key], width=70 if kind in ("file", "save") else 16).grid(row=row, column=1, sticky="w")
             if kind in ("file", "save"):
                 ttk.Button(frame, text="Browse...", command=lambda k=key, t=kind: browse(k, t)).grid(row=row, column=2, padx=6)
 
     def on_map_changed(*_):
         map_file = variables["map"].get().strip()
-        if not map_file or not Path(map_file).is_file():
-            return
-        if not variables["underlay"].get().strip() or not Path(variables["underlay"].get()).is_file():
-            variables["underlay"].set(_guess_underlay(map_file))
-        if not variables["out"].get().strip():
+        if map_file and Path(map_file).is_file() and not variables["out"].get().strip():
             variables["out"].set(str(Path(map_file).parent / (Path(map_file).name.split(".")[0] + "_3d.png")))
 
     variables["map"].trace_add("write", on_map_changed)
@@ -862,64 +920,68 @@ def main():
         kwargs = json.loads(Path(sys.argv[2]).read_text())
         if kwargs.get("slice_range"):
             kwargs["slice_range"] = tuple(kwargs["slice_range"])
-        plot_slice_stack(kwargs.pop("map_file"), kwargs.pop("underlay_file"), kwargs.pop("out_file", None), **kwargs)
+        plot_slice_stack(kwargs.pop("map_file"), kwargs.pop("out_file", None), **kwargs)
         return
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("map", help="Signal change / t-stat map in atlas space (NIfTI)")
-    p.add_argument("underlay", help="Atlas template on the same grid (NIfTI)")
-    p.add_argument("out", nargs="?", help="Output image (.png, .pdf, .svg); optional with --interactive or --movie")
+    p.add_argument("map", help="map in atlas space (NIfTI)")
+    p.add_argument("out", nargs="?", help="output image (.png, .pdf, .svg); optional with --interactive or --movie")
+    p.add_argument("--underlay", help="anatomy on the atlas grid (default: found from the analysis folder)")
     p.add_argument("--view", choices=VIEWS, default="stack")
-    p.add_argument("--layout", choices=("tiled", "physical"), default="tiled")
-    p.add_argument("--axis", choices=AXES, default="coronal")
-    p.add_argument("--n-slices", type=int, help="number of slices (tiled: default 8)")
-    p.add_argument("--thickness", type=float, help="slice thickness in mm")
-    p.add_argument("--tile-view", choices=list(TILE_VIEWS) + ["custom"], default="paper oblique")
-    p.add_argument("--depth-gain", type=float, default=3.0, help="tiled: exaggeration of the slice thickness")
+    p.add_argument("--axis", choices=list(AXES), default="coronal")
+    p.add_argument("--n-tiles", type=int, default=6)
+    p.add_argument("--slab-slices", type=int, default=5)
+    p.add_argument("--depth-gain", type=float, default=3.0)
     p.add_argument("--tile-gap", type=float, default=0.15)
     p.add_argument("--tile-rise", type=float, default=0.2)
-    p.add_argument("--columns", type=int, help="tiled: tiles per row (default: automatic)")
+    p.add_argument("--columns", type=int)
+    p.add_argument("--stack-view", choices=list(STACK_VIEWS) + ["custom"], default="paper oblique")
+    p.add_argument("--yaw", type=float)
+    p.add_argument("--tilt", type=float)
     p.add_argument("--reverse-order", action="store_true")
-    p.add_argument("--gap", type=float, default=2.0, help="physical: space between slabs in mm")
-    p.add_argument("--azimuth", type=float, default=35.0)
-    p.add_argument("--elevation", type=float, default=25.0)
-    p.add_argument("--range", nargs=2, type=float, metavar=("START", "END"), dest="slice_range",
-                   help="range along the slice axis in atlas mm (default: extent of the map)")
+    p.add_argument("--range", nargs=2, type=float, metavar=("START", "END"), dest="slice_range", help="slab range in atlas mm")
     p.add_argument("--cover", choices=("data", "brain"), default="data")
+    p.add_argument("--projection", choices=("mean", "max"), default="mean", help="map over the slab thickness (max for sparse maps)")
+    p.add_argument("--camera", choices=list(CAMERA_PRESETS) + ["custom"], default="oblique")
+    p.add_argument("--azimuth", type=float)
+    p.add_argument("--elevation", type=float)
     p.add_argument("--threshold", type=float, default=0.0)
     p.add_argument("--vmax", type=float)
-    p.add_argument("--cmap", default="autumn")
-    p.add_argument("--alpha", type=float, default=1.0)
-    p.add_argument("--alpha-min", type=float, default=0.55, help="opacity of weak values (0-1)")
-    p.add_argument("--projection", choices=("mean", "max"), default="mean")
-    p.add_argument("--view-angle", type=float, default=25.0, help="perspective opening angle in degrees, 0 = parallel projection ")
-    p.add_argument("--surface-levels", type=int, default=3)
-    p.add_argument("--volume-opacity", type=float, default=1.0)
-    p.add_argument("--interactive", action="store_true", help="open an interactive 3D viewer (rotate with the mouse; s = save the view)")
-    p.add_argument("--movie", metavar="FILE.mp4", help="also write a video")
-    p.add_argument("--movie-seconds", type=float, default=8.0)
-    p.add_argument("--outline", action="store_true", help="dark line around the faces of the slices")
-    p.add_argument("--side-color", choices=("gray", "anatomy"), default="gray", help="sides of the slabs ")
+    p.add_argument("--color-min", type=float)
+    p.add_argument("--cmap", default="blackbdy")
+    p.add_argument("--sign", choices=("positive", "negative", "both"), default="positive")
+    p.add_argument("--strength", type=float, default=5.0)
+    p.add_argument("--alpha-max", type=float, default=1.0)
+    p.add_argument("--atlas-opacity", type=float, default=0.8)
+    p.add_argument("--brain-opacity", type=float, default=0.3)
+    p.add_argument("--surface-mode", choices=("voxels", "contour"), default="voxels")
+    p.add_argument("--max-dim", type=int, default=180)
+    p.add_argument("--upsample", type=int, default=2)
     p.add_argument("--brain-mask")
-    p.add_argument("--upsample", type=int, default=3)
-    p.add_argument("--flip-view", action="store_true", help="look at the slices from the other side")
-    p.add_argument("--no-labels", action="store_true", help="no slice position labels")
-    p.add_argument("--label-origin", type=float, default=0.0, help="mm subtracted from the slice labels (e.g. bregma)")
+    p.add_argument("--coverage")
+    p.add_argument("--no-labels", action="store_true")
+    p.add_argument("--label-origin", type=float, default=0.0)
+    p.add_argument("--scale-bar-um", type=float, default=500)
     p.add_argument("--label", default="", help="colorbar label")
     p.add_argument("--title", default="")
     p.add_argument("--no-colorbar", action="store_true")
-    p.add_argument("--background", default="white", help="colour or 'transparent'")
+    p.add_argument("--background", default="black", help="colour or 'transparent'")
     p.add_argument("--dpi", type=int, default=300)
+    p.add_argument("--interactive", action="store_true", help="open an interactive 3D viewer (s = save the view)")
+    p.add_argument("--movie", metavar="FILE.mp4")
+    p.add_argument("--movie-seconds", type=float, default=8.0)
     a = p.parse_args()
     if not a.out and not a.interactive and not a.movie:
         p.error("an output file is required (or use --interactive / --movie)")
-    plot_slice_stack(a.map, a.underlay, a.out, view=a.view, layout=a.layout, axis=a.axis, thickness=a.thickness, gap=a.gap, azimuth=a.azimuth,
-                     elevation=a.elevation, tile_view=a.tile_view, n_slices=a.n_slices, depth_gain=a.depth_gain, tile_gap=a.tile_gap,
-                     tile_rise=a.tile_rise, columns=a.columns, reverse_order=a.reverse_order, slice_range=a.slice_range, cover=a.cover,
-                     threshold=a.threshold, vmax=a.vmax, cmap=a.cmap, alpha=a.alpha, alpha_min=a.alpha_min, projection=a.projection,
-                     brain_mask=a.brain_mask, upsample=a.upsample, flip_view=a.flip_view, slice_labels=not a.no_labels,
-                     label_origin=a.label_origin, label=a.label, title=a.title, colorbar=not a.no_colorbar, background=a.background,
-                     dpi=a.dpi, view_angle=a.view_angle, outline=a.outline, side_color=a.side_color, surface_levels=a.surface_levels,
-                     volume_opacity=a.volume_opacity, interactive=a.interactive, movie_file=a.movie, movie_seconds=a.movie_seconds)
+    plot_slice_stack(a.map, a.out, underlay_file=a.underlay, view=a.view, axis=a.axis, n_tiles=a.n_tiles, slab_slices=a.slab_slices,
+                     depth_gain=a.depth_gain, tile_gap=a.tile_gap, tile_rise=a.tile_rise, columns=a.columns, stack_view=a.stack_view,
+                     yaw=a.yaw, tilt=a.tilt, reverse_order=a.reverse_order, slice_range=a.slice_range, cover=a.cover,
+                     projection=a.projection, camera=a.camera,
+                     azimuth=a.azimuth, elevation=a.elevation, threshold=a.threshold, vmax=a.vmax, color_min=a.color_min, cmap=a.cmap,
+                     sign=a.sign, strength=a.strength, alpha_max=a.alpha_max, atlas_opacity=a.atlas_opacity, brain_opacity=a.brain_opacity,
+                     surface_mode=a.surface_mode, max_dim=a.max_dim, upsample=a.upsample, brain_mask=a.brain_mask, coverage=a.coverage,
+                     slice_labels=not a.no_labels, label_origin=a.label_origin, scale_bar_um=a.scale_bar_um, label=a.label, title=a.title,
+                     colorbar=not a.no_colorbar, background=a.background, dpi=a.dpi, interactive=a.interactive, movie_file=a.movie,
+                     movie_seconds=a.movie_seconds)
 
 
 if __name__ == "__main__":

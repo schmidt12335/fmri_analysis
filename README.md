@@ -22,7 +22,7 @@ flowchart LR
 | Electrical stimulation, EPI | `mol_fMRI_electric_stim_preprocessing.ipynb`, then `..._analysis.ipynb` and/or `..._poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 | Electrical stimulation, SORDINO | `mol_fMRI_sordino_preprocessing.ipynb`, then `mol_fMRI_sordino_analysis.ipynb` and/or `mol_fMRI_sordino_poststim_analysis.ipynb` | [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) |
 
-Versions: the injection notebook has its own file per version (`mol_fMRI_v5.x.ipynb`); the electrical stimulation notebooks (EPI and SORDINO) share one version number (currently 2.2), printed when a notebook starts and saved in every `session.json`. Both histories are in [CHANGELOG.md](CHANGELOG.md).
+Versions: the injection notebook has its own file per version (`mol_fMRI_v5.x.ipynb`); the electrical stimulation notebooks (EPI and SORDINO) share one version number (currently 2.3), printed when a notebook starts and saved in every `session.json`. Both histories are in [CHANGELOG.md](CHANGELOG.md).
 
 The notebooks `mol_fMRI_v5.4` to `v5.6` and `mol_fMRI_elstim_old` are earlier versions that stay in this folder because they use the helper modules next to them. All older, self-contained notebooks are in [archive/](archive). Both are kept for reference only.
 
@@ -76,6 +76,15 @@ So you are asked once per machine. Delete `fmri_root.txt` to choose another fold
 
 Raw data is read from `RawData/<...>/<session>/<scan number>/` (the Bruker scan folders). Results are written to `AnalysedData/<...>/<subject ID>/`, i.e. next to the session's position in the tree with `RawData` replaced by `AnalysedData`; the subject ID is read from the `subject` file of the session.
 
+### Atlases
+
+The `atlas` folder of the data folder holds the atlases for the registration to atlas space:
+
+- **Rat:** SIGMA in vivo template and anatomical atlas (`atlas/SIGMA_rat_atlas/`).
+- **Mouse:** Allen CCFv3 regions (`atlas/Allen_DevCCF_P56/`). The animals are registered to the DevCCF P56 T2-weighted MRI template, which comes with the Allen CCFv3 template and annotation warped into its space; the ROI analysis uses the 316 Allen summary structures, split into left and right. Make the files once with `python tools/build_allen_atlas.py --download` (downloads about 200 MB). Before November 2026 (stimulation notebooks up to v2.2, mol_fMRI v5.8 before its release) the mouse atlas was DSURQE; mouse results made with DSURQE have other region names and are in another space, so do not mix them with new results. An analysis folder that was registered to another atlas is detected and set aside (`previous_atlas_<date>/`) when the analysis is run again.
+
+When you publish results with the mouse atlas, cite: Kronman, F.N. et al. (2024) Developmental mouse brain common coordinate framework. *Nat Commun* 15, 9072 (DevCCF, CC BY 4.0, https://doi.org/10.6084/m9.figshare.25714965), and Wang, Q. et al. (2020) The Allen Mouse Brain Common Coordinate Framework: a 3D reference atlas. *Cell* 181, 936–953.
+
 ## Injection analysis (`mol_fMRI_v5.8`)
 
 Standard analysis of an injection experiment (vasoactive peptides or sensor ligands): the signal after the injection is compared with a baseline to give a percent signal change map, plus time courses in hand-drawn or automatic ROIs. One functional scan and one structural scan are processed per run.
@@ -108,7 +117,8 @@ AnalysedData/<...>/<subject ID>/
 | Script | Purpose |
 |---|---|
 | `scripts/nifti_to_mp4.py` | Movie of the time series of one slice of a 4D NIfTI file |
-| `plot_slice_stack.py` | 3D figures of signal change maps on the atlas: slice stack (flat tiles in rows like in fUSI papers, or slabs behind each other), volume rendering and surface rendering; PNG, interactive viewer you can rotate with the mouse, and rotating MP4. Needs `pyvista` and `imageio-ffmpeg`. Run without arguments for a form (View dropdown: stack / volume / surface); command line e.g. `--view volume --movie out.mp4`; use `--projection max` for small or sparse effects |
+| `plot_slice_stack.py` | 3D figures of maps in atlas space, built like the 3D viewer of [deConfUSIon](https://github.com/SonerCgu/deConfUSIon): slice stack (slabs of the atlas as tiles side by side), volume rendering and surface rendering, black background, blackbody colours. Mouse maps are shown on the Allen CCFv3 template (found automatically). PNG, interactive viewer you can rotate with the mouse, and rotating MP4. Needs `pyvista` and `imageio-ffmpeg`. Run without arguments for a form; command line e.g. `python plot_slice_stack.py map.nii.gz out.png --view volume --movie out.mp4`; use `--projection max` for small or sparse effects |
+| `tools/build_allen_atlas.py` | Builds the mouse atlas files once (Allen regions on the DevCCF MRI template, see *Atlases* above) |
 | `scripts/roi_atlas_analysis.py` | Time courses of every region of a multi-label atlas |
 | `mol_fMRI_distortion_correction_rp.py` | EPI distortion correction (FSL topup), used by the notebooks |
 

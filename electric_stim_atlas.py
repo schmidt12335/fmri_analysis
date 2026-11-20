@@ -6,9 +6,12 @@ composed into one functional -> atlas matrix, and the multi-label
 atlas is resampled once onto the functional grid with nearest-neighbour interpolation, so the functional data itself is
 never interpolated. Finished registrations in atlas_dir are reused.
 """
+import json
 import re
+import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import nibabel as nib
@@ -19,8 +22,17 @@ from electric_stim_helpers import bcolors, print_statement
 
 
 def species_atlas_config(fmri_root):
-    """Atlas files and registration settings per species. Rat: SIGMA in vivo. Mouse: DSURQE (40 µm, ex vivo T2w)."""
+    """Atlas files and registration settings per species.
+
+    Rat: SIGMA in vivo template and anatomical atlas.
+    Mouse: Allen CCFv3. The animal is registered to the DevCCF P56 T2w MRI template (ex vivo, 50 µm; Kronman et al. 2024), which
+    comes with the Allen CCFv3 template and annotation warped into its space. Labels: the 316 Allen summary structures split into
+    left and right (built once with tools/build_allen_atlas.py).
+    "anatomy" is the image shown under the maps in 3D figures (plot_slice_stack.py), "roi_region" the region of the automatic
+    ROIs of mol_fMRI (start of the label name).
+    """
     atlas_root = f"{fmri_root}/atlas"
+    allen_dir = f"{atlas_root}/Allen_DevCCF_P56"
     sigma_dir = (f"{atlas_root}/SIGMA_rat_atlas/sigma_wistar_rat_brain_templatesandatlases_version1-2-1_2022-08-26/"
                  "SIGMA_Wistar_Rat_Brain_TemplatesAndAtlases_Version1.2.1")
     sigma_atlas_dir = f"{sigma_dir}/SIGMA_Rat_Brain_Atlases/SIGMA_Anatomical_Atlas/InVivo_Atlas"
@@ -30,16 +42,50 @@ def species_atlas_config(fmri_root):
             "labels": f"{sigma_atlas_dir}/SIGMA_InVivo_Anatomical_Brain_Atlas.nii",
             "mask": "", "names": f"{sigma_atlas_dir}/SIGMA_InVivo_Anatomical_Brain_Atlas_ListOfStructures.csv",
             "warp": "shift_rotate", "cost": "lpa+ZZ", "reg_voxel_mm": None,
+            "anatomy": f"{sigma_dir}/SIGMA_Rat_Anatomical_Imaging/SIGMA_Rat_Anatomical_InVivo_Template/SIGMA_InVivo_Brain_Template_Masked.nii",
+            "roi_region": "striatum",
         },
         "mouse": {
-            "template": f"{atlas_root}/DSURQE_mouse_atlas/DSURQE_40micron_average.nii",
-            "labels": f"{atlas_root}/DSURQE_mouse_atlas/DSURQE_40micron_labels.nii",
-            "mask": f"{atlas_root}/DSURQE_mouse_atlas/DSURQE_40micron_mask.nii",
-            "names": f"{atlas_root}/DSURQE_mouse_atlas/dsurqe_labels.csv",
+            "template": f"{allen_dir}/devccf_t2_50um.nii.gz",
+            "labels": f"{allen_dir}/allen_summary_labels_50um.nii.gz",
+            "mask": f"{allen_dir}/devccf_brainmask_50um.nii.gz",
+            "names": f"{allen_dir}/allen_summary_labels.csv",
             # Scaling absorbs the size difference between in vivo brains and the ex vivo template
             "warp": "shift_rotate_scale", "cost": "nmi", "reg_voxel_mm": 0.1,
+            "anatomy": f"{allen_dir}/allen_ccfv3_template_50um.nii.gz",
+            "roi_region": "Caudoputamen",
         },
     }
+
+
+ATLAS_RECORD = "atlas_used.json"
+
+
+def ensure_atlas_folder(atlas_dir, atlas_template, atlas_labels):
+    """Makes sure that the registrations reused from `atlas_dir` were made with this atlas.
+
+    The registration files of a folder are reused, so a folder made with another atlas (e.g. a mouse analysis from before the
+    switch from DSURQE to Allen) would silently combine an old registration with the new labels. The atlas of a folder is
+    recorded in atlas_used.json; if it differs, or if the folder has registration files but no record, everything in it is
+    moved to a subfolder `previous_atlas_<date>` and the registration is done again.
+    """
+    atlas_dir = Path(atlas_dir)
+    atlas_dir.mkdir(parents=True, exist_ok=True)
+    record = atlas_dir / ATLAS_RECORD
+    current = {"template": str(Path(atlas_template).resolve()), "labels": str(Path(atlas_labels).resolve())}
+    previous = json.loads(record.read_text()) if record.exists() else None
+    content = [p for p in atlas_dir.iterdir() if p.name != ATLAS_RECORD and not p.name.startswith("previous_atlas_")]
+    if previous == current:
+        return
+    if content and (previous is not None or any(p.name.startswith(("struct2atlas", "template_")) for p in content)):
+        old = atlas_dir / f"previous_atlas_{time.strftime('%Y%m%d_%H%M%S')}"
+        old.mkdir()
+        for p in content:
+            shutil.move(str(p), str(old / p.name))
+        made_with = previous["template"] if previous else "an earlier atlas (before atlas_used.json was written; mouse: DSURQE)"
+        print_statement(f"[NOTE] {atlas_dir.name} was made with {made_with}. Its files were moved to {old.name}/ and the registration "
+                        f"is done again with {current['template']}.", bcolors.NOTIFICATION)
+    record.write_text(json.dumps(current, indent=1) + "\n")
 
 
 def run_afni(cmd, capture=False):
@@ -437,10 +483,11 @@ def qc_struct2atlas(struct_file, atlas_dir, template, atlas_labels, struct_mask=
 
 
 def qc_labels_funcspace(labels_file, func_reference, brain_mask, out_dir, min_voxels=5, n_slices=4,
-                        min_coverage=0.9, min_dice=0.7):
+                        min_coverage=0.9, min_dice=0.7, atlas_brain_file=None):
     """QC of the end result: the atlas labels on the functional grid against the functional brain mask. Shows how much
-    of the brain has an atlas label and how many regions have enough voxels inside the mask. Red outline: functional
-    brain mask, cyan: atlas brain (labels > 0)."""
+    of the brain is covered by the atlas brain and how many regions have enough voxels inside the mask. Red outline: functional
+    brain mask, cyan: atlas brain (the brain mask of the atlas moved onto the functional grid, `atlas_brain_file`, if the atlas has
+    one; otherwise labels > 0. The Allen regions leave fibre tracts and ventricles unlabelled, so labels > 0 is not the brain.)"""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     report = _QcReport()
@@ -450,17 +497,22 @@ def qc_labels_funcspace(labels_file, func_reference, brain_mask, out_dir, min_vo
     if brain.shape != labels.shape:
         raise ValueError(f"Brain mask {brain.shape} and atlas labels {labels.shape} differ in shape.")
 
-    atlas_brain = labels > 0
+    atlas_brain = (_load3d(atlas_brain_file) > 0) if atlas_brain_file else labels > 0
+    brain_source = "atlas brain mask" if atlas_brain_file else "labels > 0"
     coverage = float(atlas_brain[brain].mean())
+    labelled = float((labels > 0)[brain].mean())
     dice = _dice(atlas_brain, brain)
-    ids, counts = np.unique(labels[brain & atlas_brain], return_counts=True)
+    ids, counts = np.unique(labels[brain & (labels > 0)], return_counts=True)
     small = int((counts < min_voxels).sum())
-    report.metrics.update({"label_coverage": coverage, "dice": dice, "regions": int(len(ids)), "regions_below_min_voxels": small})
-    report.line(f"Share of the brain mask voxels that have an atlas label: {100 * coverage:.1f}%")
-    report.line(f"Dice between atlas brain (labels > 0) and functional brain mask: {dice:.3f}")
+    report.metrics.update({"label_coverage": coverage, "labelled_share": labelled, "dice": dice, "regions": int(len(ids)),
+                           "regions_below_min_voxels": small})
+    report.line(f"Share of the brain mask voxels inside the atlas brain ({brain_source}): {100 * coverage:.1f}%")
+    if atlas_brain_file:
+        report.line(f"Share of the brain mask voxels with a region label (fibre tracts and ventricles have none): {100 * labelled:.1f}%")
+    report.line(f"Dice between atlas brain ({brain_source}) and functional brain mask: {dice:.3f}")
     report.line(f"Regions inside the brain mask: {len(ids)}, of which {small} have fewer than {min_voxels} voxels")
     if coverage < min_coverage:
-        report.warn(f"only {100 * coverage:.0f}% of the brain mask has an atlas label (< {100 * min_coverage:.0f}%)")
+        report.warn(f"only {100 * coverage:.0f}% of the brain mask lies inside the atlas brain (< {100 * min_coverage:.0f}%)")
     if dice < min_dice:
         report.warn(f"atlas brain and brain mask overlap poorly (Dice {dice:.2f} < {min_dice})")
 
@@ -480,15 +532,23 @@ def registration_qc(struct_file, func_reference, brain_mask, atlas_dir, species_
     each with "metrics" and "warnings"."""
     atlas_dir = Path(atlas_dir)
     template = prepare_registration_template(atlas_template, atlas_mask, species_cfg["reg_voxel_mm"], atlas_dir)
+    atlas_brain_file = None
+    composite = atlas_dir / "func_to_atlas_for_roi_apply.aff12.1D"
+    if atlas_mask and composite.exists():
+        atlas_brain_file = atlas_dir / "qc" / "atlas_brain_funcspace.nii.gz"
+        atlas_brain_file.parent.mkdir(parents=True, exist_ok=True)
+        run_afni(["3dAllineate", "-source", atlas_mask, "-master", func_reference, "-1Dmatrix_apply", composite,
+                  "-final", "NN", "-prefix", atlas_brain_file, "-overwrite"])
     return {
         "struct2func": qc_struct2func(struct_file, func_reference, brain_mask, atlas_dir, struct_mask),
         "struct2atlas": qc_struct2atlas(struct_file, atlas_dir, template, atlas_labels, struct_mask),
-        "labels": qc_labels_funcspace(labels_funcspace, func_reference, brain_mask, atlas_dir / "qc", min_voxels),
+        "labels": qc_labels_funcspace(labels_funcspace, func_reference, brain_mask, atlas_dir / "qc", min_voxels,
+                                      atlas_brain_file=atlas_brain_file),
     }
 
 
 def load_label_names(csv_path):
-    """Accepts an id,name CSV or the DSURQE/SIGMA layouts with separate left and right label columns."""
+    """Accepts an id,name CSV (Allen labels of tools/build_allen_atlas.py) or the SIGMA layout with separate left and right label columns."""
     df = pd.read_csv(csv_path)
     cols = {c.lower().strip(): c for c in df.columns}
     if "id" in cols and "name" in cols:

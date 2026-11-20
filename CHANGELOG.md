@@ -14,6 +14,9 @@ Two options that are **still in testing**; both are off by default, so the noteb
   - Tested on rat data only. The test scripts (`scripts/automask_test.py`, `scripts/automask_coreg_test.py`) are in the repository. With automatic instead of hand-drawn masks the functional → structural registration fitted equally well in 6 sessions (transforms differed by 0.4 mm and 2° on average).
 - 3D automatic ROIs: the dropdown "Block depth" in the automatic ROI section makes the ROI a 3×3×3 voxel block over three consecutive slices instead of a 3×3 block in one slice (default). The whole block has to lie inside the striatum and the despeckled mask. The z-scores of 3D blocks are not comparable with those of the 3×3 blocks.
 
+### Changed
+- Mouse atlas: Allen CCFv3 instead of DSURQE (shared with the stimulation notebooks, see v2.3 there). The automatic ROIs use the caudoputamen for the mouse (the striatum of SIGMA for the rat, unchanged). A registration folder made with another atlas is moved to `previous_atlas_<date>/` and the registration is done again (`ensure_atlas_folder` in `electric_stim_atlas.py`).
+
 ## v5.7
 
 ### Added
@@ -48,23 +51,30 @@ Two options that are **still in testing**; both are off by default, so the noteb
 
 ## Scripts
 
-### plot_slice_stack.py (2026-11-20)
-Now one tool for three 3D views of a map on the atlas template (modelled on the figures of the deConfUSIon toolbox, SonerCgu/deConfUSIon), chosen with `--view` / the "View" dropdown of the form:
-- **stack** with two layouts. `tiled` (new default, `--layout tiled`): the slices are flat tiles side by side in rows (n tiles evenly spread over the extent of the map, `--n-slices`, default 8), each a little offset downwards from its left neighbour, seen from a slightly oblique angle with an orthographic camera (`--tile-view` "paper oblique", "shallow oblique", "face-on" or "custom"), so that every slice is completely visible; the thickness is exaggerated (`--depth-gain`) so the sides show; spacing `--tile-gap`, offset `--tile-rise`, `--columns`, `--reverse-order`; every tile has a position label. `physical` (`--layout physical`): the previous view with slabs standing behind each other with gaps.
-- **volume**: volume rendering, a translucent brain with the map as a glowing volume inside (`--volume-opacity`).
-- **surface**: a translucent brain surface with nested iso-surfaces of the map (`--surface-levels`, positive and negative values).
-- All views: figure (png/pdf/svg, with colorbar), interactive window (`--interactive`) and rotating video (`--movie file.mp4`, `--movie-seconds`; the stacks sway to both sides, volume and surface turn around once). Needs `imageio-ffmpeg` for the video (already in `requirements.txt`).
-- The map is drawn with an opacity ramp (`--alpha-min`, default 0.55, up to 1 at the end of the colour scale): weak values stay translucent and the anatomy shows through. Colours of weak values are therefore blended with the template; the colorbar is exact at the top.
-- The dark outline around the slices is off by default (`--outline` to switch it on); the form is scrollable and has headings. Old saved form entries are still read.
-- Earlier today: rebuilt as a 3D rendering with pyvista / VTK (`pip install pyvista`, now in `requirements.txt`; the old matplotlib renderer was removed): smooth closed slab solids, depth buffer, lighting and anti-aliasing, gray shaded sides, the outline follows the bright tissue so the dark rim of the template does not show. Interactive viewer (drag = rotate, scroll = zoom, shift + drag = move, `s` = save the view, `q` = close); in the form the rendering and the viewer run in their own processes.
-- Note: with "mean" over the slice thickness a small or sparse effect can drop below the threshold and disappear; use `--projection max` (the form says so).
-- Tested on the mouse (0.1 mm) template in coronal, sagittal and axial direction, all three views, interactive screenshot and video export.
+### plot_slice_stack.py (2026-11-20, rebuilt after the deConfUSIon viewer)
+Rebuilt to work like the 3D viewer of the deConfUSIon toolbox (`fusiVolumeGUI.m`, github.com/SonerCgu/deConfUSIon), on the Allen CCFv3 template for mouse maps:
+- **Volume rendering** is one colour volume, as in deConfUSIon: the anatomy is a faint blue-gray haze whose opacity is set for the whole brain (`--atlas-opacity`, default 0.8 along the longest path through the brain), the map gets an opacity that rises with the value (square-root lifted, times `--strength`, default 5), and the anatomy is dimmed around strong responses. It is rendered with VTK's CPU ray caster, which applies the opacity per voxel like MATLAB's `volshow`; the GPU renderer used before ignored it for colour volumes, which is why the old volume looked like slices put together. The opacity is stored as its cube root, so the very small per-voxel opacity of the anatomy keeps its precision in 8 bit.
+- **Slice stack:** every slab (mean of `--slab-slices` atlas slices, default 5 × 50 µm) is a flat tile with a front and a back face (the old slabs looked empty from behind) and side walls along the exact outline of the brain; tiles side by side, each rising a little (`--tile-gap`, `--tile-rise`; more than 6 tiles are split into strips), parallel camera "paper oblique" (yaw −6°, tilt 8°), labels with position and thickness, 500 µm scale bar. `--projection max` shows the largest value of the slab instead of the mean (better for sparse maps).
+- **Surface rendering:** translucent brain surface with the map as unsmoothed voxels in their exact colours (`--surface-mode voxels`, default) or as a smooth contour.
+- Black background and the FSLeyes "blackbdy_iso" colours by default (`--background`, `--cmap`); the colour scale starts at 0 (`--color-min`), values below `--threshold` are hidden. The map is only shown in the measured region (`brain_mask_atlasspace.nii.gz` next to the map, or `--coverage`).
+- The anatomy and brain mask are found from the analysis folder (`atlas_used.json`): the Allen template for mouse maps, the registration template otherwise; `--underlay` sets it by hand. The call is now `plot_slice_stack(map_file, out_file, ...)` (the anatomy became the keyword `underlay_file`).
+- Output as before: figure with colorbar, interactive window (`--interactive`; `s` saves the view), rotating video (`--movie`); the form has new fields for all settings.
+- Tested on a mouse t-map registered to the new Allen atlas and on a synthetic map, all three views, video and interactive window.
+
+### tools/build_allen_atlas.py (2026-11-20)
+- New: makes the mouse atlas files in `atlas/Allen_DevCCF_P56/` from the DevCCF P56 download (Kronman et al. 2024, CC BY 4.0): the T2w MRI template and brain mask for the registration, the 316 Allen summary structures (Allen structure set 167587189, cortical layers merged) split at the midline (right 1–316, left 1001–1316) with a names CSV, and the Allen CCFv3 template on the same 50 µm grid for figures. The coordinate origin is moved to the centre of the brain (DevCCF has it in a corner, far from the animal scans; the registration corrects large shifts only left-right and up-down by the centre of mass). `--download` fetches the files.
 
 ## Electrical stimulation notebooks
 
 The notebooks for the analysis of electrical stimulation experiments (EPI: `mol_fMRI_electric_stim_*.ipynb`, SORDINO: `mol_fMRI_sordino_*.ipynb`, with `electric_stim_helpers.py`, `electric_stim_session.py`, `electric_stim_atlas.py`, `sordino_helpers.py`) have **one version number for the whole set**, EPI and SORDINO together. It is the constant `STIM_NOTEBOOKS_VERSION` in `electric_stim_session.py`, printed by the first code cell of every notebook and saved as `stim_notebooks_version` in the `session.json` of every preprocessing run (an analysis notebook notes if a session was preprocessed with another version). A change of the notebooks gets a new version here and a new value of the constant.
 
 Versions up to 2.1 were assigned afterwards from the git history (the dates are those of the commits; several commit messages are only "minor changes", so those entries only say which notebooks were touched). See [docs/electric_stim_analysis.md](docs/electric_stim_analysis.md) for the description of the notebooks.
+
+### v2.3 (2026-11-20)
+- Mouse atlas: **Allen CCFv3 instead of DSURQE.** The structural scan is registered to the DevCCF P56 T2w MRI template (MRI to MRI, same settings as before: brain-masked, 0.1 mm, scaling, `nmi`), which contains the Allen CCFv3 template and annotation; the regions are the 316 Allen summary structures split into left and right (`*_L` / `*_R`, names like "Primary somatosensory area, barrel field_L"). Files made once with `tools/build_allen_atlas.py`. On the test animal (RGRO_260915_0224_BL6_1364) the registration needed less scaling than with DSURQE (y-scale 0.91 instead of 0.73, 1.5° instead of 12° tilt) and the atlas brain overlapped the functional brain mask better (Dice 0.90 instead of 0.87). Results of mouse analyses made with DSURQE have other region names and ids and are in another atlas space; do not mix them.
+- The analysis notebooks take the atlas settings from `electric_stim_atlas.species_atlas_config` (they had their own copy).
+- A `roi_atlas_<species>/` folder records its atlas in `atlas_used.json`; a folder made with another atlas (or before this version) is moved to `previous_atlas_<date>/` and the registration is done again, so an old registration is never combined with new labels.
+- Atlas labels QC: the coverage and the Dice are computed with the brain mask of the atlas (if it has one) instead of "labels > 0", because the Allen regions leave fibre tracts and ventricles unlabelled; the share of voxels with a region label is reported as well.
 
 ### v2.2 (2026-11-19)
 - Version numbers for the stimulation notebooks (see above). Sessions made before this version show "unknown (made before version numbers)".

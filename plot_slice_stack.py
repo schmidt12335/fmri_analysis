@@ -84,9 +84,44 @@ def _load(path, reference=None, order=1):
     return img, (data[..., 0] if data.ndim == 4 else data)
 
 
+def _same_grid(a, b):
+    return a.shape[:3] == b.shape[:3] and np.allclose(a.affine, b.affine, atol=1e-3)
+
+
+def find_structural(map_file):
+    """(structural image, brain mask) if the map is in structural space, i.e. on the grid of a `cleaned_struct.nii.gz` of a sibling
+    `<scan>anatomy` folder of the session (e.g. cleaned_signal_change_map_coregistered_structural_space.nii.gz). Several structural
+    scans of one session with the same grid are told apart by the correlation of the aligned functional mean
+    (`mean_func_struct_aligned.nii.gz`, next to the map) with them. ("", "") if the map is not in structural space."""
+    map_path = Path(map_file).resolve()
+    map_img = nib.load(str(map_path))
+    candidates = []
+    for folder in list(map_path.parents)[:4]:
+        for struct in sorted(folder.glob("*anatomy*/cleaned_struct.nii.gz")):
+            if _same_grid(nib.load(str(struct)), map_img):
+                candidates.append(struct)
+        if candidates:
+            break
+    if not candidates:
+        return "", ""
+    best = candidates[0]
+    aligned = map_path.with_name("mean_func_struct_aligned.nii.gz")
+    if len(candidates) > 1 and aligned.is_file():
+        reference = np.asarray(nib.load(str(aligned)).get_fdata(dtype=np.float32)).ravel()
+        scores = [np.corrcoef(reference, np.asarray(nib.load(str(c)).get_fdata(dtype=np.float32)).ravel())[0, 1] for c in candidates]
+        best = candidates[int(np.nanargmax(scores))]
+    mask = best.with_name("mask_struct.nii.gz")
+    print(f"[INFO] Map in structural space: anatomy {best}")
+    return str(best), str(mask) if mask.is_file() else ""
+
+
 def find_anatomy(map_file):
-    """(anatomy, brain mask) for a map made by the pipeline: the atlas folder of the analysis records the template it was registered
-    to (atlas_used.json); the Allen template next to it is the anatomy. Falls back to template_registration_*.nii.gz."""
+    """(anatomy, brain mask) for a map made by the pipeline. A map in structural space gets the structural image of the animal
+    (find_structural). A map in atlas space: the atlas folder of the analysis records the template it was registered to
+    (atlas_used.json); the Allen template next to it is the anatomy. Falls back to template_registration_*.nii.gz."""
+    structural = find_structural(map_file)
+    if structural[0]:
+        return structural
     for folder in list(Path(map_file).resolve().parents)[:4]:
         record = folder / "atlas_used.json"
         if record.is_file():
@@ -111,6 +146,7 @@ def _prepare(map_file, underlay_file, brain_mask, coverage, threshold, vmax, col
         raise ValueError("The anatomy must be in standard (non-oblique) orientation.")
     _, over = _load(map_file, reference=under_img)
     over = np.nan_to_num(over)
+    map_spacing = np.abs(np.array(nib.as_closest_canonical(nib.load(str(map_file))).header.get_zooms()[:3], dtype=float))
     if brain_mask:
         brain = _load(brain_mask, reference=under_img, order=0)[1] > 0.5
     else:
@@ -137,7 +173,34 @@ def _prepare(map_file, underlay_file, brain_mask, coverage, threshold, vmax, col
     return SimpleNamespace(affine=aff, spacing=np.abs(np.diag(aff)[:3]), world=[aff[a, a] * np.arange(under.shape[a]) + aff[a, 3] for a in range(3)],
                            anatomy=anatomy, brain=brain, covered=inside, psc=psc, threshold=float(threshold), vmax=float(vmax),
                            color_min=float(0.0 if color_min is None else color_min), cmap=_colormap(cmap), sign=sign,
-                           negative=negative)
+                           negative=negative, map_spacing=map_spacing)
+
+
+def _regrid(c, factor_limit=2.0):
+    """Interpolates (linearly) the strongly anisotropic direction of the data, i.e. the thick slices of an EPI acquisition (0.7 mm next
+    to 0.047 mm in the plane), to about twice the finest voxel size, so that the map becomes a smooth 3D object instead of a pile of
+    plates. The map is interpolated with 0 outside the measured region (values fade between slices) and cut off again where less
+    than half of the interpolated voxel lies in the measured region."""
+    axis = int(np.argmax(c.spacing))
+    finest = float(c.spacing.min())
+    factor = int(round(c.spacing[axis] / (factor_limit * finest)))
+    if factor < 2:
+        return c
+    zoom = [float(factor) if a == axis else 1.0 for a in range(3)]
+
+    def up(arr, order=1):
+        return ndimage.zoom(arr.astype(np.float32), zoom, order=order, grid_mode=True, mode="nearest")
+
+    covered = up(c.covered) > 0.5
+    brain = up(c.brain) > 0.5
+    psc = np.where(covered, up(np.nan_to_num(c.psc)), np.nan).astype(np.float32)
+    anatomy = np.clip(up(c.anatomy), 0, 1)
+    anatomy[~brain] = 0
+    spacing = c.spacing.copy()
+    spacing[axis] /= factor
+    world = list(c.world)
+    world[axis] = c.world[axis][0] + spacing[axis] * (np.arange(anatomy.shape[axis]) - (factor - 1) / 2)
+    return SimpleNamespace(**{**vars(c), "anatomy": anatomy, "brain": brain, "covered": covered, "psc": psc, "spacing": spacing, "world": world})
 
 
 def _transfer(c, values, alpha_max, strength, lift=True):
@@ -315,8 +378,12 @@ def _block_mean(arr, stride, nan=False):
     return a.mean(axis=(1, 3, 5))
 
 
-def _downsampled(c, max_dim):
-    stride = max(1, int(np.ceil(max(c.anatomy.shape) / max_dim)))
+def _downsampled(c, max_dim, budget):
+    """Block means with the smallest stride that keeps the grid under `budget` voxels (or at most `max_dim` voxels per axis if given)."""
+    if max_dim:
+        stride = max(1, int(np.ceil(max(c.anatomy.shape) / max_dim)))
+    else:
+        stride = max(1, int(np.ceil((c.anatomy.size / budget) ** (1 / 3))))
     anatomy = _block_mean(c.anatomy, stride)
     brain = _block_mean(c.brain, stride) > 0.5
     psc = _block_mean(c.psc, stride, nan=True)
@@ -326,26 +393,42 @@ def _downsampled(c, max_dim):
 
 
 def _build_volume(pv, c, atlas_opacity, alpha_max, strength, max_dim):
-    """One RGBA volume, composed like fusiVolumeRGBA ("overall" atlas opacity, clear PSC on)."""
-    tissue, brain, psc, spacing, origin = _downsampled(c, max_dim)
+    """Volume rendering as in fusiVolumeRGBA ("overall" atlas opacity, clear PSC on), made of scalar volumes with opacity tables:
+    the anatomy as a faint blue-gray haze (dimmed around strong responses) and the map, positive and negative values separately."""
+    tissue, brain, psc, spacing, origin = _downsampled(c, max_dim, 8e6)
     weight = brain * np.maximum(0.15, tissue)
-    path = max(float(weight.sum(axis=a).max()) for a in range(3))
-    at = 1 - (1 - min(1.0, atlas_opacity)) ** (weight / max(path, 1e-9))
-    tone = np.minimum(1, 1.5 * np.sqrt(np.maximum(0, tissue)))
-    rgb = np.stack([0.85 * tone, 0.90 * tone, 0.95 * tone], -1) * at[..., None]
-    alpha = at
-    prgb, ap = _transfer(c, psc, alpha_max, strength)
+    # "typical" path through the brain (95th percentile of the paths along the three axes), as in fusiVolumeAutoAppearance: with the longest
+    # path a thin slab or an image with a strong intensity fall-off would come out far too transparent
+    paths = np.concatenate([weight.sum(axis=a).ravel() for a in range(3)])
+    path = float(np.percentile(paths[paths > 0], 95)) if (paths > 0).any() else 1.0
+    _, ap = _transfer(c, psc, alpha_max, strength)
     envelope = ndimage.gaussian_filter(ap, 1.0, mode="nearest")
     attenuation = 1 - 0.8 * np.minimum(1, envelope / max(alpha_max, 1e-9))
-    rgb, alpha = rgb * attenuation[..., None], alpha * attenuation
-    rgb = rgb * (1 - ap[..., None]) + prgb * ap[..., None]
-    alpha = alpha * (1 - ap) + ap
-    rgb = np.clip(rgb / np.maximum(alpha, 1e-6)[..., None], 0, 1)
-    grid = pv.ImageData(dimensions=tissue.shape, spacing=tuple(float(s) for s in spacing), origin=tuple(float(o) for o in origin))
-    # 8 bit per channel; the opacity is stored as its cube root so that the tiny per-voxel opacity of the anatomy keeps its precision
-    rgba = np.concatenate([rgb, np.cbrt(np.clip(alpha, 0, 1))[..., None]], -1)
-    grid.point_data["rgba"] = np.round(rgba.reshape(-1, 4, order="F") * 255).astype(np.uint8)
-    return SimpleNamespace(grid=grid, spacing=spacing, bounds_brain=_brain_bounds(brain, spacing, origin))
+    anatomy = (np.where(brain, np.maximum(tissue, 1e-3), 0) * attenuation).astype(np.float32)
+
+    def grid_of(values):
+        grid = pv.ImageData(dimensions=values.shape, spacing=tuple(float(s) for s in spacing), origin=tuple(float(o) for o in origin))
+        grid.point_data["v"] = np.ascontiguousarray(values, dtype=np.float32).ravel(order="F")
+        return grid
+
+    # anatomy: the opacity of a voxel follows its (undimmed) tissue value so that the total opacity along a typical path is atlas_opacity
+    x = np.linspace(0, 1, 100)
+    haze_opacity = np.where(x > 0, 1 - (1 - min(1.0, atlas_opacity)) ** (np.maximum(0.15, x) / max(path, 1e-9)), 0.0)
+    tone = np.minimum(1, 1.5 * np.sqrt(x))
+    haze_colors = np.stack([0.85 * tone, 0.90 * tone, 0.95 * tone], 1)
+    volumes = [dict(grid=grid_of(anatomy), cmap=ListedColormap(haze_colors), clim=(0.0, 1.0), opacity=haze_opacity)]
+    for sign, cmap in ((1, c.cmap), (-1, NEG_CMAP)):
+        if sign == 1 and c.sign == "negative" or sign == -1 and c.sign == "positive":
+            continue
+        magnitude = np.nan_to_num(np.where(sign * psc > 0, np.abs(psc), 0))
+        if not (magnitude >= c.threshold).any():
+            continue
+        values = np.linspace(c.color_min, c.vmax, 100)
+        shown = values * sign if c.sign == "both" else values
+        _, table = _transfer(c, np.array(shown), alpha_max, strength)
+        table = np.where(values >= c.threshold, table, 0.0)
+        volumes.append(dict(grid=grid_of(magnitude), cmap=cmap, clim=(c.color_min, c.vmax), opacity=table))
+    return SimpleNamespace(volumes=volumes, spacing=spacing, bounds_brain=_brain_bounds(brain, spacing, origin))
 
 
 def _brain_bounds(brain, spacing, origin, n_points=20000):
@@ -358,20 +441,11 @@ def _brain_bounds(brain, spacing, origin, n_points=20000):
 
 
 def _add_volume(pl, vol):
-    import vtk
-    actor = pl.add_volume(vol.grid, scalars="rgba", mapper="fixed_point", show_scalar_bar=False)
-    # The CPU ray caster applies the opacity per voxel like MATLAB's volshow (the GPU mapper ignores the unit distance for RGBA data)
-    actor.mapper.SetAutoAdjustSampleDistances(0)
-    actor.mapper.SetImageSampleDistance(1.0)
-    actor.mapper.SetSampleDistance(float(vol.spacing.min()) / 2)
-    table = vtk.vtkPiecewiseFunction()
-    for code in range(256):
-        table.AddPoint(code, (code / 255) ** 3)
-    actor.prop.SetScalarOpacity(0, table)
-    actor.prop.SetScalarOpacityUnitDistance(float(vol.spacing.min()))
-    actor.prop.interpolation_type = "linear"
-    actor.prop.shade = False
-    return actor
+    for item in vol.volumes:
+        # opacity per voxel (as MATLAB's volshow): the unit distance of the opacity table is the voxel size. (A table of exactly 256
+        # entries is misread by pyvista, hence 100.)
+        pl.add_volume(item["grid"], scalars="v", cmap=item["cmap"], clim=item["clim"], opacity=list(item["opacity"]), show_scalar_bar=False,
+                      mapper="gpu", opacity_unit_distance=float(vol.spacing.min()), shade=False)
 
 
 # -------------------------------------------------------------------------------------------------------------- surface view
@@ -416,8 +490,10 @@ def _voxel_faces(pv, active, rgb, alpha, spacing, origin):
 
 
 def _build_surface(pv, c, brain_opacity, alpha_max, strength, max_dim, surface_mode):
-    tissue, brain, psc, spacing, origin = _downsampled(c, max_dim)
-    brain_surface = _iso(pv, brain, 0.5, spacing, origin, 1.0)
+    tissue, brain, small_psc, small_spacing, small_origin = _downsampled(c, max_dim, 2.5e6)
+    brain_surface = _iso(pv, brain, 0.5, small_spacing, small_origin, 1.0)
+    # the map keeps the resolution of the data (not the coarser grid of the brain surface)
+    psc, spacing, origin = c.psc, c.spacing, np.array([w[0] for w in c.world])
     rgb, ap = _transfer(c, psc, alpha_max, strength)
     items = []
     if surface_mode == "voxels":
@@ -435,15 +511,16 @@ def _build_surface(pv, c, brain_opacity, alpha_max, strength, max_dim, surface_m
             if surf is not None:
                 col, a = _transfer(c, np.array([sign * level]), alpha_max, strength)
                 items.append(("contour", (surf, tuple(col[0]), float(a[0]))))
-    return SimpleNamespace(brain=brain_surface, brain_opacity=brain_opacity, items=items, bounds_brain=_brain_bounds(brain, spacing, origin))
+    return SimpleNamespace(brain=brain_surface, brain_opacity=brain_opacity, items=items,
+                           bounds_brain=_brain_bounds(brain, small_spacing, small_origin))
 
 
 # ------------------------------------------------------------------------------------------------------------------ figure
-def plot_slice_stack(map_file, out_file=None, *, underlay_file=None, view="stack", axis="coronal", n_tiles=6, slab_slices=5,
+def plot_slice_stack(map_file, out_file=None, *, underlay_file=None, view="stack", axis="coronal", n_tiles=6, slab_slices=None,
                      depth_gain=3.0, tile_gap=0.15, tile_rise=0.2, columns=None, stack_view="paper oblique", yaw=None, tilt=None,
                      reverse_order=False, slice_range=None, cover="data", projection="mean", camera="oblique", azimuth=None, elevation=None,
                      threshold=0.0, vmax=None, color_min=None, cmap="blackbdy", sign="positive", alpha_max=1.0, strength=5.0,
-                     atlas_opacity=0.8, brain_opacity=0.3, surface_mode="voxels", max_dim=180, upsample=2, brain_mask=None,
+                     atlas_opacity=0.8, brain_opacity=0.3, surface_mode="voxels", max_dim=None, upsample=None, brain_mask=None,
                      coverage=None, slice_labels=True, label_origin=0.0, scale_bar_um=500, label="", title="", colorbar=True,
                      background="black", dpi=300, figsize=(10, 6), interactive=False, view_file=None, movie_file=None,
                      movie_seconds=8.0, movie_fps=20, show=False, _screenshot_instead=None):
@@ -454,7 +531,8 @@ def plot_slice_stack(map_file, out_file=None, *, underlay_file=None, view="stack
     view            "stack", "volume" or "surface"
     axis            stack: slice direction "coronal" (default), "sagittal" or "axial"
     n_tiles         stack: number of slabs, evenly spread over the extent of the data (or `slice_range` in atlas mm)
-    slab_slices     stack: atlas slices averaged per slab (5 x 50 µm = 250 µm for the Allen template)
+    slab_slices     stack: slices averaged per slab (default: about 250 µm, i.e. 5 slices of the Allen template, 1 slice of a 0.7 mm
+                    structural-space map)
     projection      stack: map over the slab thickness, "mean" (default, as deConfUSIon) or "max" (largest magnitude; better for
                     small or sparse responses, which the mean dilutes below the threshold)
     depth_gain      stack: the slab thickness is shown this many times thicker (display only)
@@ -468,11 +546,12 @@ def plot_slice_stack(map_file, out_file=None, *, underlay_file=None, view="stack
     cmap            colormap of positive values (default "blackbdy", FSLeyes blackbdy_iso; any matplotlib name)
     sign            "positive" (default), "negative" or "both"
     alpha_max, strength  opacity of the map: rises from the threshold to vmax up to alpha_max, square-root lifted, times strength
-    atlas_opacity   volume: opacity of the anatomy along the longest path through the brain
+    atlas_opacity   volume: opacity of the anatomy along a typical path through the brain
     brain_opacity   surface: opacity of the brain surface
     surface_mode    surface: "voxels" (unsmoothed voxels, exact colours) or "contour" (smooth surface at one level)
-    max_dim         volume / surface: the atlas is averaged down to at most this many voxels per axis
-    upsample        stack: in-plane enlargement of the tiles (smoother outlines)
+    max_dim         volume / surface: the anatomy is averaged down to at most this many voxels per axis (default: automatic, by the
+                    number of voxels; the map itself is shown at its full resolution in the surface view)
+    upsample        stack: in-plane enlargement of the tiles (default: 2, or 1 if the map has a voxel size of 0.06 mm or finer in the plane)
     coverage        image of the measured brain region in atlas space (default: brain_mask_atlasspace.nii.gz next to the map)
     label_origin    mm subtracted from the slab positions in the labels (e.g. the position of bregma in the atlas)
     interactive     open a window that can be rotated with the mouse (s = save the view as PNG, q = close)
@@ -497,7 +576,12 @@ def plot_slice_stack(map_file, out_file=None, *, underlay_file=None, view="stack
     aspect = figsize[0] / figsize[1]
 
     if view == "stack":
-        scene = _build_stack(pv, c, axis, int(n_tiles), int(slab_slices), depth_gain, tile_gap, tile_rise, columns, slice_range, cover,
+        slice_step = float(c.spacing[AXES[axis][0]])
+        slab_slices = max(1, int(round(0.25 / slice_step))) if slab_slices is None else int(slab_slices)
+        if upsample is None:
+            in_plane = [c.map_spacing[a] for a in range(3) if a != AXES[axis][0]]
+            upsample = 1 if max(in_plane) <= 0.06 else 2
+        scene = _build_stack(pv, c, axis, int(n_tiles), slab_slices, depth_gain, tile_gap, tile_rise, columns, slice_range, cover,
                              reverse_order, alpha_max, strength, int(upsample), aspect, projection)
         if stack_view != "custom":
             yaw, tilt = STACK_VIEWS[stack_view]
@@ -505,8 +589,9 @@ def plot_slice_stack(map_file, out_file=None, *, underlay_file=None, view="stack
         pts = np.vstack([m.points for m in scene.meshes])
         up = np.array([0.0, 1.0, 0.0])
     else:
-        built = _build_volume(pv, c, atlas_opacity, alpha_max, strength, max_dim) if view == "volume" else \
-            _build_surface(pv, c, brain_opacity, alpha_max, strength, max_dim, surface_mode)
+        cf = _regrid(c)
+        built = _build_volume(pv, cf, atlas_opacity, alpha_max, strength, max_dim) if view == "volume" else \
+            _build_surface(pv, cf, brain_opacity, alpha_max, strength, max_dim, surface_mode)
         pts = built.bounds_brain
         up = np.array([0.0, 0.0, 1.0])
     centre = (pts.min(0) + pts.max(0)) / 2
@@ -721,7 +806,7 @@ GUI_FIELDS = [
     ("_s1", "Slice stack", "", "section", None),
     ("axis", "Slice direction", "coronal", "choice", list(AXES)),
     ("n_tiles", "Number of slabs", "6", "text", None),
-    ("slab_slices", "Atlas slices per slab (5 x 50 µm = 250 µm)", "5", "text", None),
+    ("slab_slices", "Slices per slab (empty = about 250 µm)", "", "text", None),
     ("depth_gain", "Show the slabs this many times thicker", "3", "text", None),
     ("tile_gap", "Gap between slabs (fraction of width)", "0.15", "text", None),
     ("tile_rise", "Rise of each next slab (fraction of height)", "0.2", "text", None),
@@ -790,7 +875,7 @@ def _gui_values_to_kwargs(v):
     out = Path(v["out"])
     return dict(
         map_file=v["map"], out_file=v["out"], underlay_file=v["underlay"].strip() or None, view=v["view"], axis=v["axis"],
-        n_tiles=number("n_tiles", int), slab_slices=number("slab_slices", int), depth_gain=number("depth_gain"),
+        n_tiles=number("n_tiles", int), slab_slices=number("slab_slices", int, optional=True), depth_gain=number("depth_gain"),
         tile_gap=number("tile_gap"), tile_rise=number("tile_rise"), columns=number("columns", int, optional=True),
         stack_view=v["stack_view"], yaw=number("yaw"), tilt=number("tilt"), cover=v["cover"], projection=v["projection"],
         slice_range=None if start is None else (start, end), reverse_order=bool(v["reverse_order"]), slice_labels=bool(v["slice_labels"]),
@@ -929,7 +1014,7 @@ def main():
     p.add_argument("--view", choices=VIEWS, default="stack")
     p.add_argument("--axis", choices=list(AXES), default="coronal")
     p.add_argument("--n-tiles", type=int, default=6)
-    p.add_argument("--slab-slices", type=int, default=5)
+    p.add_argument("--slab-slices", type=int, help="slices averaged per slab (default: about 250 µm)")
     p.add_argument("--depth-gain", type=float, default=3.0)
     p.add_argument("--tile-gap", type=float, default=0.15)
     p.add_argument("--tile-rise", type=float, default=0.2)
@@ -954,8 +1039,8 @@ def main():
     p.add_argument("--atlas-opacity", type=float, default=0.8)
     p.add_argument("--brain-opacity", type=float, default=0.3)
     p.add_argument("--surface-mode", choices=("voxels", "contour"), default="voxels")
-    p.add_argument("--max-dim", type=int, default=180)
-    p.add_argument("--upsample", type=int, default=2)
+    p.add_argument("--max-dim", type=int, help="volume / surface: voxels per axis of the anatomy (default: automatic)")
+    p.add_argument("--upsample", type=int, help="stack: in-plane enlargement of the tiles (default: automatic)")
     p.add_argument("--brain-mask")
     p.add_argument("--coverage")
     p.add_argument("--no-labels", action="store_true")

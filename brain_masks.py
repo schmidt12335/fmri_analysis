@@ -1,8 +1,8 @@
 """Automatic brain masks (structural and functional) and their quality check.
 
 Copied from the injection pipeline notebook mol_fMRI_v5.8.ipynb (cell 1, unchanged apart from the imports) for the
-electrical stimulation preprocessing notebook (mol_fMRI_electric_stim_preprocessing_v2.4.ipynb). Still in testing:
-see CHANGELOG.md (v5.8 and stimulation notebooks v2.4) for the methods and the test results.
+electrical stimulation preprocessing notebook (mol_fMRI_electric_stim_preprocessing_v2.4.ipynb). See CHANGELOG.md
+(v5.8 and stimulation notebooks v2.4) for the methods and the test results. Always look at the quality-check figure.
 
 Masks:
 - structural: `automatic_structural_mask` (3dSkullStrip -rat on the head crop + 3dAutomask within 0.4 mm), made or found by

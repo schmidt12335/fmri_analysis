@@ -14,7 +14,7 @@ SESSION_FILE = "session.json"
 
 # Version of the electrical stimulation notebooks (EPI and SORDINO, with their helper modules): one number for the whole set.
 # It is printed at the top of every notebook and saved in session.json. Change it together with a new entry in CHANGELOG.md.
-STIM_NOTEBOOKS_VERSION = "2.3"
+STIM_NOTEBOOKS_VERSION = "2.4"
 STITCHED_PATTERN = re.compile(r"stitched_(\d+(?:-\d+)*)_(.+)")
 PATH_KEYS = ("in_path", "analysed_func_dir", "analysed_struct_dir", "analysis_dir")
 

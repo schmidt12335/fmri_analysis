@@ -86,3 +86,21 @@ def merge_with_tr(scan_files, out_file, tr):
     subprocess.run(["fslmerge", "-tr", str(out_file)] + [str(f) for f in scan_files] + [f"{tr:.6f}"], check=True)
     print_statement(f"[OK] Scans concatenated -> {Path(out_file).name} (TR {tr:.4f} s)", bcolors.OKGREEN)
     return out_file
+
+
+def detect_sequence_type(scan_dir):
+    """Sequence type of a Bruker scan from the `##$Method` entry of its `method` file (same as in mol_fMRI_v5.8.ipynb):
+    "sordino" if the method name contains sordino, "epi" if it contains EPI (e.g. `<Bruker:EPI>`), None if the file is missing
+    or the method is neither (the caller should then ask)."""
+    method_file = Path(scan_dir) / "method"
+    if not method_file.exists():
+        return None
+    match = re.search(r"^##\$Method=<(?:\w+:)?([^>]+)>", method_file.read_text(errors="ignore"), re.M)
+    if not match:
+        return None
+    name = match.group(1).lower()
+    if "sordino" in name:
+        return "sordino"
+    if "epi" in name:
+        return "epi"
+    return None

@@ -1,6 +1,8 @@
 # Electrical stimulation fMRI analysis
 
-Two sets of notebooks with the same structure, one per sequence:
+**Version 2.4 (still in testing): two notebooks for both sequences.** `mol_fMRI_electric_stim_preprocessing_v2.4.ipynb` does the preprocessing for EPI and SORDINO (the sequence is detected from the method file or chosen in a dropdown) and can make the brain masks automatically (structural and functional, methods of `mol_fMRI_v5.8`, functions in `brain_masks.py`; hand-drawn stays the default). `mol_fMRI_electric_stim_analysis_v2.4.ipynb` contains the stimulation response analysis (2a below) and the post-stimulation analysis (2b) as two parts that can be ticked separately; the atlas registration is done once for both. The steps, outputs and file names are the ones described below. Differences to v2.3: the post-stimulation window duration is entered in seconds; the stimulation response CSV also has `on_psc` / `rest_psc` for SORDINO; the stimulation response maps are saved as float32. See the [CHANGELOG](../CHANGELOG.md#electrical-stimulation-notebooks).
+
+Version 2.3: two sets of notebooks with the same structure, one per sequence (kept unchanged):
 
 | | EPI | SORDINO (zero echo time, 3D radial) |
 |---|---|---|

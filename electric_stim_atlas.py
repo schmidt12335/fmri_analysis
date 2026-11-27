@@ -349,7 +349,7 @@ def _overlay_figure(panels, slices, axis, crop, title, out_png):
     plt.close(fig)
 
 
-def qc_struct2func(struct_file, func_reference, brain_mask, atlas_dir, struct_mask=None, out_dir=None, n_slices=4,
+def qc_struct2func(struct_file, func_reference, brain_mask, atlas_dir, struct_mask=None, out_dir=None, figure_dir=None, n_slices=4,
                    min_dice=0.6):
     """QC of the structural -> functional registration (`struct2func_masked*` in atlas_dir): size of the transform,
     NMI and brain mask overlap against a header-only alignment, and an overlay image. Red outline: functional brain
@@ -414,7 +414,7 @@ def qc_struct2func(struct_file, func_reference, brain_mask, atlas_dir, struct_ma
         report.warn("brain mask overlap is clearly WORSE than the header-only alignment")
 
     slices = _pick_slices(brain, axis, n_slices)
-    out_png = out_dir / "qc_struct2func.png"
+    out_png = (Path(figure_dir) if figure_dir else out_dir) / "qc_struct2func.png"  # figure: figure_dir if given, the report stays in out_dir
     _overlay_figure([("header-only alignment", hdr, [(brain, "red"), (hdr_mask, "cyan")], None),
                      ("registered", reg, [(brain, "red"), (reg_mask, "cyan")], None),
                      ("functional image", func, [(brain, "red"), (reg_mask, "cyan")], None)],
@@ -424,7 +424,7 @@ def qc_struct2func(struct_file, func_reference, brain_mask, atlas_dir, struct_ma
     return report.finish("struct2func QC", out_dir / "qc_struct2func.txt")
 
 
-def qc_struct2atlas(struct_file, atlas_dir, template, atlas_labels, struct_mask=None, out_dir=None, n_slices=4,
+def qc_struct2atlas(struct_file, atlas_dir, template, atlas_labels, struct_mask=None, out_dir=None, figure_dir=None, n_slices=4,
                     min_dice=0.6):
     """QC of the structural -> atlas registration (`struct2atlas*` in atlas_dir): the transform, and how well the
     structural brain mask matches the atlas brain (labels > 0) inside the part of the atlas covered by the structural
@@ -473,7 +473,7 @@ def qc_struct2atlas(struct_file, atlas_dir, template, atlas_labels, struct_mask=
             report.warn(f"brain mask Dice {report.metrics['dice']:.2f} is below {min_dice}")
 
     slices = _pick_slices(reg_mask & cover, axis, n_slices)
-    out_png = out_dir / "qc_struct2atlas.png"
+    out_png = (Path(figure_dir) if figure_dir else out_dir) / "qc_struct2atlas.png"  # figure: figure_dir if given, the report stays in out_dir
     outlines = [(atlas_brain, "red"), (reg_mask, "cyan")]
     _overlay_figure([("atlas template", template_img, outlines, None), ("registered structural", reg, outlines, None)],
                     slices, axis, _crop(atlas_brain, axis),
@@ -482,7 +482,7 @@ def qc_struct2atlas(struct_file, atlas_dir, template, atlas_labels, struct_mask=
     return report.finish("struct2atlas QC", out_dir / "qc_struct2atlas.txt")
 
 
-def qc_labels_funcspace(labels_file, func_reference, brain_mask, out_dir, min_voxels=5, n_slices=4,
+def qc_labels_funcspace(labels_file, func_reference, brain_mask, out_dir, figure_dir=None, min_voxels=5, n_slices=4,
                         min_coverage=0.9, min_dice=0.7, atlas_brain_file=None):
     """QC of the end result: the atlas labels on the functional grid against the functional brain mask. Shows how much
     of the brain is covered by the atlas brain and how many regions have enough voxels inside the mask. Red outline: functional
@@ -517,7 +517,7 @@ def qc_labels_funcspace(labels_file, func_reference, brain_mask, out_dir, min_vo
         report.warn(f"atlas brain and brain mask overlap poorly (Dice {dice:.2f} < {min_dice})")
 
     axis = _slice_axis(func_reference)
-    out_png = out_dir / "qc_labels_funcspace.png"
+    out_png = (Path(figure_dir) if figure_dir else out_dir) / "qc_labels_funcspace.png"  # figure: figure_dir if given, the report stays in out_dir
     outlines = [(brain, "red"), (atlas_brain, "cyan")]
     _overlay_figure([("brain mask and atlas brain", func, outlines, None), ("atlas labels", func, [(brain, "red")], labels)],
                     _pick_slices(brain, axis, n_slices), axis, _crop(brain | atlas_brain, axis),
@@ -527,9 +527,11 @@ def qc_labels_funcspace(labels_file, func_reference, brain_mask, out_dir, min_vo
 
 
 def registration_qc(struct_file, func_reference, brain_mask, atlas_dir, species_cfg, atlas_template, atlas_labels,
-                    labels_funcspace, struct_mask=None, atlas_mask="", min_voxels=5):
+                    labels_funcspace, struct_mask=None, atlas_mask="", min_voxels=5, figure_dir=None):
     """All three checks after `register_to_atlas`. Returns {"struct2func": ..., "struct2atlas": ..., "labels": ...},
-    each with "metrics" and "warnings"."""
+    each with "metrics" and "warnings". The overlay figures go to `figure_dir` if given (else to atlas_dir/qc, with the reports)."""
+    if figure_dir:
+        Path(figure_dir).mkdir(parents=True, exist_ok=True)
     atlas_dir = Path(atlas_dir)
     template = prepare_registration_template(atlas_template, atlas_mask, species_cfg["reg_voxel_mm"], atlas_dir)
     atlas_brain_file = None
@@ -540,9 +542,9 @@ def registration_qc(struct_file, func_reference, brain_mask, atlas_dir, species_
         run_afni(["3dAllineate", "-source", atlas_mask, "-master", func_reference, "-1Dmatrix_apply", composite,
                   "-final", "NN", "-prefix", atlas_brain_file, "-overwrite"])
     return {
-        "struct2func": qc_struct2func(struct_file, func_reference, brain_mask, atlas_dir, struct_mask),
-        "struct2atlas": qc_struct2atlas(struct_file, atlas_dir, template, atlas_labels, struct_mask),
-        "labels": qc_labels_funcspace(labels_funcspace, func_reference, brain_mask, atlas_dir / "qc", min_voxels,
+        "struct2func": qc_struct2func(struct_file, func_reference, brain_mask, atlas_dir, struct_mask, figure_dir=figure_dir),
+        "struct2atlas": qc_struct2atlas(struct_file, atlas_dir, template, atlas_labels, struct_mask, figure_dir=figure_dir),
+        "labels": qc_labels_funcspace(labels_funcspace, func_reference, brain_mask, atlas_dir / "qc", figure_dir, min_voxels,
                                       atlas_brain_file=atlas_brain_file),
     }
 

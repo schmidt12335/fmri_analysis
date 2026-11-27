@@ -110,9 +110,10 @@ def find_structural(map_file):
         reference = np.asarray(nib.load(str(aligned)).get_fdata(dtype=np.float32)).ravel()
         scores = [np.corrcoef(reference, np.asarray(nib.load(str(c)).get_fdata(dtype=np.float32)).ravel())[0, 1] for c in candidates]
         best = candidates[int(np.nanargmax(scores))]
-    mask = best.with_name("mask_struct.nii.gz")
+    # struct_mask.nii.gz (the name fsleyes proposes, also used by the automatic masks); older analyses have mask_struct.nii.gz
+    mask = next((m for m in (best.with_name("struct_mask.nii.gz"), best.with_name("mask_struct.nii.gz")) if m.is_file()), None)
     print(f"[INFO] Map in structural space: anatomy {best}")
-    return str(best), str(mask) if mask.is_file() else ""
+    return str(best), str(mask) if mask else ""
 
 
 def find_anatomy(map_file):

@@ -8,7 +8,9 @@ Masks:
 - structural: `automatic_structural_mask` (3dSkullStrip -rat on the head crop + 3dAutomask within 0.4 mm), made or found by
   `prepare_structural_mask` (an existing mask, hand-drawn or automatic, is never replaced)
 - functional: `automatic_functional_mask` (structural mask moved to the functional grid through the headers; EPI: trimmed with
-  an intensity threshold; SORDINO: partial-volume transfer, no trimming, slab of structural slices via `limit_mask_to_slab`)
+  an intensity threshold; SORDINO: partial-volume transfer, no trimming, slab of structural slices via `limit_mask_to_slab`);
+  EPI option: registered to the functional image first (`register_structural_to_functional`, with a scaling along the phase-encoding
+  axis from `get_phase_encoding_axis`, copied from mol_fMRI_v5.8)
 - `mask_quality_check`: overlay figure and warnings for gross failures; the figure has to be looked at
 - `record_mask_source` / `mask_source`: automatic masks are recorded in <mask>.source.json; a mask saved over it counts as hand-drawn
 """
@@ -21,11 +23,12 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 
+import mol_fMRI_distortion_correction_rp as distortion_correction
 from electric_stim_helpers import bcolors, bruker_to_nifti, print_statement
 from electric_stim_session import structural_mask_file as find_structural_mask
 
 __all__ = ["record_mask_source", "mask_source", "find_structural_mask", "limit_mask_to_slab", "automatic_structural_mask",
-           "automatic_functional_mask", "prepare_structural_mask", "MASK_QC_LIMITS", "mask_quality_check", "mean_of_middle_volumes"]
+           "automatic_functional_mask", "register_structural_to_functional", "get_phase_encoding_axis", "prepare_structural_mask", "MASK_QC_LIMITS", "mask_quality_check", "mean_of_middle_volumes"]
 
 
 def record_mask_source(mask_file, method, **info):
@@ -191,12 +194,157 @@ def automatic_structural_mask(struct_file, out_mask, n_slices=None, shift_slices
     return method
 
 
+def register_structural_to_functional(func_image, struct_image, struct_brain_mask, weight_mask, out_dir, pe_axis=None,
+                                      pe_scale_range=(0.85, 1.15), max_rot_deg=5.0, max_shift_mm=2.0):
+    """Register the skull-stripped structural image to the functional image (AFNI 3dAllineate, cost nmi), for the automatic functional
+    mask of EPI scans (option "automatic + registration").
+
+    The header transfer puts the structural brain where the scanner coordinates say; EPI is shifted and compressed or stretched along the
+    phase-encoding axis by field distortion, so the mask can be too large there. This registration allows shift and rotation (bounded by
+    `max_shift_mm`, `max_rot_deg`) and, if `pe_axis` is given, a scaling along that axis (within `pe_scale_range`; all other scales 1, shears
+    0). The cost is evaluated inside `weight_mask` (on the functional grid; the header-transferred mask, dilated). Local distortion (e.g.
+    near the ear canals) is not corrected.
+
+    Parameters
+    ----------
+    func_image : 3D functional image (base)
+    struct_image, struct_brain_mask : structural image and its brain mask (the brain is the source)
+    weight_mask : bool array on the functional grid
+    out_dir : folder for the matrix (`auto_mask_struct_to_func.aff12.1D`), the parameters and the registered structural brain
+        (`auto_mask_struct_in_func.nii.gz`, to look at in fsleyes on top of the functional image)
+    pe_axis : "x", "y", "z" or None (AFNI coordinate axis, see `get_phase_encoding_axis`; None = shift and rotation only)
+
+    Returns
+    -------
+    dict with `matrix` (path), `shift_mm`, `rotation_deg`, `pe_axis`, `pe_scale` and `at_limit` (the scale is at the end of its range)."""
+    import tempfile
+
+    out_dir = Path(out_dir)
+    fimg = nib.load(str(func_image))
+    simg = nib.load(str(struct_image))
+    sdata = np.asarray(simg.dataobj, dtype=np.float32).squeeze()
+    brain = np.asarray(nib.load(str(struct_brain_mask)).dataobj).squeeze() > 0
+    if brain.shape != sdata.shape:
+        raise ValueError(f"{struct_image} and {struct_brain_mask} have different grids.")
+    matrix = out_dir / "auto_mask_struct_to_func.aff12.1D"
+    params = out_dir / "auto_mask_struct_to_func_params.1D"
+    registered = out_dir / "auto_mask_struct_in_func.nii.gz"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        header = simg.header.copy()
+        header.set_data_dtype(np.float32)
+        header.set_data_shape(sdata.shape)
+        source = tmp / "struct_brain.nii.gz"
+        nib.save(nib.Nifti1Image(np.where(brain, sdata, 0).astype(np.float32), simg.affine, header), str(source))
+        wheader = fimg.header.copy()
+        wheader.set_data_dtype(np.uint8)
+        wheader.set_data_shape(weight_mask.shape)
+        weight = tmp / "weight.nii.gz"
+        nib.save(nib.Nifti1Image(weight_mask.astype(np.uint8), fimg.affine, wheader), str(weight))
+        cmd = ["3dAllineate", "-overwrite", "-base", str(func_image), "-source", str(source), "-weight", str(weight), "-cost", "nmi",
+               "-twopass", "-maxrot", str(max_rot_deg), "-maxshf", str(max_shift_mm), "-1Dmatrix_save", str(matrix),
+               "-1Dparam_save", str(params), "-final", "linear", "-prefix", str(registered)]
+        if pe_axis is None:
+            cmd += ["-warp", "shift_rotate"]
+        else:
+            # affine_general parameters: 1-3 shifts, 4-6 angles, 7-9 scales (x, y, z), 10-12 shears
+            scale_param = {"x": 7, "y": 8, "z": 9}[pe_axis]
+            cmd += ["-warp", "affine_general", "-parang", str(scale_param), str(pe_scale_range[0]), str(pe_scale_range[1])]
+            for p, v in [(p, 1) for p in (7, 8, 9) if p != scale_param] + [(10, 0), (11, 0), (12, 0)]:
+                cmd += ["-parfix", str(p), str(v)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not matrix.exists():
+            raise RuntimeError("3dAllineate failed: " + " ".join(result.stderr.strip().splitlines()[-3:]))
+    values = np.atleast_2d(np.loadtxt(str(params), comments="#"))[-1]
+    scale = float(values[6 + "xyz".index(pe_axis)]) if pe_axis is not None and len(values) >= 9 else None
+    at_limit = scale is not None and min(abs(scale - pe_scale_range[0]), abs(pe_scale_range[1] - scale)) < 0.005
+    return {"matrix": matrix, "shift_mm": [round(float(v), 2) for v in values[:3]], "rotation_deg": [round(float(v), 2) for v in values[3:6]],
+            "pe_axis": pe_axis, "pe_scale": None if scale is None else round(scale, 3), "at_limit": bool(at_limit)}
+
+
+def get_phase_encoding_axis(func_file, in_path, scan_number, manual_axis=None):
+    """
+    Phase-encoding axis of the functional scan, as the axis of the AFNI coordinate system (x = left-right,
+    y = anterior-posterior, z = inferior-superior) along which the voxel axis of `func_file` runs. This is the
+    axis that 3dAllineate scales refer to.
+
+    The scanner labels in the Bruker `method` file (read/slice orientation) are NOT used: they refer to the
+    scanner frame and do not match the anatomical axes of the converted image (for a coronal rodent scan
+    they report an "axial" slice orientation). The axis is taken from, in this order:
+      1. `manual_axis`: the "Phase-encoding axis" dropdown (voxel axis of func.nii.gz, as in the distortion step);
+      2. the saved detection `func.detected_pe.json` (written here or by the distortion correction step);
+      3. brkraw's BIDS sidecar (PhaseEncodingDirection) of the scan, converted again in a temporary folder
+         and carried through the LPI reorientation using the NIfTI affines (as in the distortion step). The
+         result is saved as `func.detected_pe.json`, so this runs only once per animal.
+
+    Parameters
+    ----------
+    func_file : str or Path
+        Converted (LPI) functional NIfTI file, e.g. `func.nii.gz`.
+    in_path : str or Path
+        Raw data folder of the subject/session (as used for `bruker_to_nifti`).
+    scan_number : str or int
+        Bruker scan number of the functional scan.
+    manual_axis : "x", "y", "z" or None
+        Voxel axis of `func_file` chosen by hand; None = detect.
+
+    Returns
+    -------
+    "x", "y" or "z"; None if the axis could not be determined (the caller should then not allow any scaling).
+    """
+    import json
+    import tempfile
+
+    func_file = Path(func_file)
+    voxel_index = {"x": 0, "y": 1, "z": 2}
+
+    def world_axis(voxel_axis):
+        affine = nib.load(str(func_file)).affine
+        return "xyz"[int(np.argmax(np.abs(affine[:3, voxel_index[voxel_axis]])))]
+
+    if manual_axis in voxel_index:
+        print_statement(f"Phase-encoding axis set by hand: voxel axis '{manual_axis}'", bcolors.NOTIFICATION)
+        return world_axis(manual_axis)
+
+    axis, sign, source = None, None, None
+    try:
+        axis, sign, _ = distortion_correction.load_detected_pe_direction(func_file)
+        source = "saved detection"
+    except Exception:
+        pass
+
+    if axis is None:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                subprocess.run(["brkraw", "tonii", f"{in_path}/", "-s", str(scan_number), "-b"], check=True, cwd=tmp,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                jsons = sorted(f for f in Path(tmp).glob(f"*{scan_number}*.json") if not f.name.startswith("._"))
+                niftis = sorted(f for f in Path(tmp).glob(f"*{scan_number}*.nii*") if not f.name.startswith("._"))
+                if jsons and niftis:
+                    with open(jsons[0]) as f:
+                        bids_value = json.load(f).get("PhaseEncodingDirection")
+                    raw_index, raw_sign = distortion_correction._bids_phase_encoding_direction_to_axis(bids_value)
+                    if raw_index is not None:
+                        index, sign = distortion_correction._propagate_axis_through_resample(raw_index, raw_sign, niftis[0], func_file)
+                        if index is not None:
+                            axis, source = "xyz"[index], "brkraw BIDS sidecar"
+                            with open(distortion_correction._pe_sidecar_path(func_file), "w") as f:
+                                json.dump({"bids_phase_encoding_direction": bids_value, "axis": axis, "sign": sign}, f, indent=2)
+        except Exception as e:
+            print_statement(f"[Note] Could not detect the phase-encoding axis: {e}", bcolors.NOTIFICATION)
+
+    if axis not in voxel_index:
+        return None
+    print_statement(f"Phase-encoding axis: voxel axis '{axis}' of {func_file.name} (from {source})", bcolors.NOTIFICATION)
+    return world_axis(axis)
+
+
 def automatic_functional_mask(func_image, struct_mask, out_mask, prior_out=None, trim_rel=0.5, partial_volume=False, pv_threshold=0.3,
-                              n_slices=None, shift_slices=0):
+                              n_slices=None, shift_slices=0, register_image=None, pe_axis=None, pe_scale_range=(0.85, 1.15)):
     """Brain mask of the functional image made from the structural mask (hand-drawn or automatic).
 
-    Both scans of a session share the scanner coordinates, so the structural mask is moved to the functional grid through the image
-    headers only (no registration). Two variants:
+    Both scans of a session share the scanner coordinates, so by default the structural mask is moved to the functional grid through the
+    image headers only (no registration). Two variants:
 
     * EPI (default arguments): moved with nearest neighbour, then trimmed with an intensity threshold (voxels of a smoothed functional
       image below `trim_rel` x the median inside the mask are removed). Dice against hand-drawn masks 0.89 (lowest 0.72, 13 rat sessions).
@@ -207,8 +355,14 @@ def automatic_functional_mask(func_image, struct_mask, out_mask, prior_out=None,
       mask (nearest neighbour puts the edge about half a functional voxel inside). In 3 rat sessions, fully automatic: Dice 0.87-0.93
       against the hand-drawn masks inside the 20-slice slab (before: 0.86-0.92, with the hand-drawn structural mask).
 
-    Holes are filled in both variants. CHECK the result: the mask is wrong if the animal moved between the structural and the functional
-    scan (in one of the 3 sordino test sessions it was about one voxel off, probably for this reason).
+    Option for EPI (`register_image` = the structural image, e.g. struct.nii.gz): before the mask is moved, the structural brain is
+    registered to the functional image (`register_structural_to_functional`: shift, rotation and, with `pe_axis`, a scaling along the
+    phase-encoding axis within `pe_scale_range`), and the mask is moved with that transform instead of the headers. For EPI masks that are
+    too large along the phase-encoding axis (EPI compressed by distortion) or shifted (the animal moved). Not yet compared with
+    hand-drawn masks. If the registration fails, the header transfer is used and a warning is printed.
+
+    In every slice only the largest connected piece is kept, and holes are filled (all variants). CHECK the result: without the registration, the mask is wrong if the animal moved between the
+    structural and the functional scan (in one of the 3 sordino test sessions it was about one voxel off, probably for this reason).
 
     Parameters
     ----------
@@ -226,10 +380,17 @@ def automatic_functional_mask(func_image, struct_mask, out_mask, prior_out=None,
         Move the mask as a partial-volume fraction (threshold `pv_threshold`) instead of nearest neighbour.
     n_slices, shift_slices : optional
         Limit the structural mask to a slab of slices first (`limit_mask_to_slab`).
+    register_image : str, optional
+        Structural image: register it to the functional image first (see above).
+    pe_axis : "x", "y", "z" or None
+        Phase-encoding axis (AFNI coordinate axis) for the scaling of the registration; None = shift and rotation only.
+    pe_scale_range : (float, float)
+        Allowed range of that scaling.
 
     Returns
     -------
-    dict with `method`, `prior_voxels`, `voxels` and `struct_slab` (first and last structural slice, if limited)."""
+    dict with `method`, `prior_voxels`, `voxels`, `struct_slab` (first and last structural slice, if limited) and `registration`
+    (None, or the result of `register_structural_to_functional`)."""
     from scipy import ndimage as ndi
     import tempfile
 
@@ -257,28 +418,66 @@ def automatic_functional_mask(func_image, struct_mask, out_mask, prior_out=None,
         values, final = smask.astype(np.uint8), "NN"
         source_header.set_data_dtype(np.uint8)
     source_header.set_data_shape(values.shape)
+    registration = None
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        identity = tmp / "identity.aff12.1D"
-        identity.write_text("1 0 0 0 0 1 0 0 0 0 1 0\n")
         source = tmp / "struct_mask_source.nii.gz"
         nib.save(nib.Nifti1Image(values, simg.affine, source_header), str(source))
-        moved = tmp / "struct_mask_in_func.nii.gz"
-        subprocess.run(["3dAllineate", "-overwrite", "-source", str(source), "-master", str(func_image), "-1Dmatrix_apply", str(identity),
-                        "-final", final, "-prefix", str(moved)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        moved_values = np.asarray(nib.load(str(moved)).dataobj, dtype=np.float32).squeeze()
-    prior = moved_values >= pv_threshold if partial_volume else moved_values > 0
-    if not prior.any():
-        raise ValueError("The structural mask lies outside the functional image (check that both scans share the same position).")
+
+        def move_to_func(matrix_file):
+            moved = tmp / "struct_mask_in_func.nii.gz"
+            subprocess.run(["3dAllineate", "-overwrite", "-source", str(source), "-master", str(func_image), "-1Dmatrix_apply", str(matrix_file),
+                            "-final", final, "-prefix", str(moved)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            moved_values = np.asarray(nib.load(str(moved)).dataobj, dtype=np.float32).squeeze()
+            return moved_values >= pv_threshold if partial_volume else moved_values > 0
+
+        identity = tmp / "identity.aff12.1D"
+        identity.write_text("1 0 0 0 0 1 0 0 0 0 1 0\n")
+        prior = move_to_func(identity)
+        if not prior.any():
+            raise ValueError("The structural mask lies outside the functional image (check that both scans share the same position).")
+        if register_image is not None:
+            header_voxels = int(prior.sum())
+            try:
+                registration = register_structural_to_functional(func_image, register_image, struct_mask,
+                                                                 ndi.binary_dilation(prior, iterations=3), Path(out_mask).parent,
+                                                                 pe_axis=pe_axis, pe_scale_range=pe_scale_range)
+                prior = move_to_func(registration["matrix"])
+            except Exception as e:
+                registration = None
+                print_statement(f"Registration of the structural to the functional image failed ({e}): the mask is moved through the headers instead.", bcolors.FAIL)
+            if registration is not None:
+                scale_text = (f", scaling along the phase-encoding axis ({pe_axis}) {registration['pe_scale']} (the EPI brain is "
+                              f"{100 * (1 / registration['pe_scale'] - 1):+.0f}% along that axis compared with the structural scan)" if registration["pe_scale"] is not None
+                              else ", no scaling (shift and rotation only)")
+                print_statement(f"Structural -> functional registration: shift {registration['shift_mm']} mm, rotation {registration['rotation_deg']} deg"
+                                f"{scale_text}; mask {int(prior.sum())} voxels (header transfer: {header_voxels})", bcolors.NOTIFICATION)
+                if registration["at_limit"]:
+                    print_statement(f"The scaling is at the limit of its range {pe_scale_range}: the registration may be compensating for something else. "
+                                    "Check the figure, and compare with the mask made without registration.", bcolors.FAIL)
+                if not prior.any():
+                    raise ValueError("After the registration the structural mask lies outside the functional image: use the option without registration.")
 
     if trim_rel is None:
         mask = prior.copy()
     else:
         smooth = ndi.gaussian_filter(data, 1.0)
         mask = prior & (smooth > trim_rel * np.median(smooth[prior]))
-    for y in range(mask.shape[1]):
-        mask[:, y, :] = ndi.binary_fill_holes(mask[:, y, :])
-    mask = ndi.binary_fill_holes(mask)
+    # One connected area per slice: in every slice only the largest piece is kept (small pieces outside the brain, left by the trimming or
+    # parts of the structural mask that are only connected through other slices), then the holes are filled
+    zooms = img.header.get_zooms()[:3]
+    slice_axis = int(np.argmax(zooms)) if max(zooms) > 1.01 * min(zooms) else 1
+    planes = np.moveaxis(mask, slice_axis, 0).copy()
+    removed_voxels, removed_slices = 0, 0
+    for k in range(planes.shape[0]):
+        labels, n = ndi.label(planes[k])
+        if n > 1:
+            keep = labels == 1 + int(np.argmax(ndi.sum(planes[k], labels, range(1, n + 1))))
+            removed_voxels += int(planes[k].sum() - keep.sum())
+            removed_slices += 1
+            planes[k] = keep
+        planes[k] = ndi.binary_fill_holes(planes[k])
+    mask = ndi.binary_fill_holes(np.moveaxis(planes, 0, slice_axis))
 
     header = img.header.copy()
     header.set_data_dtype(np.uint8)
@@ -287,13 +486,19 @@ def automatic_functional_mask(func_image, struct_mask, out_mask, prior_out=None,
     if prior_out is not None:
         nib.save(nib.Nifti1Image(prior.astype(np.uint8), img.affine, header), str(prior_out))
     method = "structural mask" + (f" limited to {int(n_slices)} slices" if slab is not None and n_slices else "")
+    if registration is not None:
+        method += " registered to the functional image (shift, rotation" + (f", scaling along {pe_axis}" if registration["pe_scale"] is not None else "") + ")"
     method += f" moved to the functional grid as partial-volume fraction >= {pv_threshold}" if partial_volume else " moved to the functional grid"
     method += " + intensity trimming" if trim_rel is not None else ""
-    record_mask_source(out_mask, method, **({"struct_slab": list(slab)} if slab is not None else {}))
+    info = {"struct_slab": list(slab)} if slab is not None else {}
+    if registration is not None:
+        info["registration"] = {k: (str(v) if k == "matrix" else v) for k, v in registration.items()}
+    record_mask_source(out_mask, method, **info)
     slab_text = f"; structural slices {slab[0]}-{slab[1]}" if slab is not None else ""
     print_statement(f"[OK] Automatic functional mask -> {out_mask} ({int(mask.sum())} voxels; {int(prior.sum())} before the "
-                    f"{'intensity trimming and ' if trim_rel is not None else ''}hole filling{slab_text})", bcolors.OKGREEN)
-    return {"method": method, "prior_voxels": int(prior.sum()), "voxels": int(mask.sum()), "struct_slab": slab}
+                    f"{'intensity trimming and ' if trim_rel is not None else ''}hole filling{slab_text}"
+                    f"{f'; {removed_voxels} voxels in small separate pieces removed in {removed_slices} slice(s)' if removed_slices else ''})", bcolors.OKGREEN)
+    return {"method": method, "prior_voxels": int(prior.sum()), "voxels": int(mask.sum()), "struct_slab": slab, "registration": registration}
 
 
 def prepare_structural_mask(in_path, struct_scan_number, analysed_struct_dir, source, functional_reference=None, force_qc=True,

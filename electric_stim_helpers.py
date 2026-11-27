@@ -118,7 +118,7 @@ def motion_correction(reference_vol, input_vol, output_prefix):
 
     print("[INFO] Running 3dvolreg…")
     return output_prefix
-def plot_motion_parameters(input_file):
+def plot_motion_parameters(input_file, out_dir="."):
 
     # ---------- 4) Plot motion parameters ----------
     print("[INFO] Creating motion plots…")
@@ -139,7 +139,7 @@ def plot_motion_parameters(input_file):
     plt.ylabel("Rotation in degrees")
     plt.legend(["Pitch (x)", "Roll (y)", "Yaw (z)"])
     plt.tight_layout()
-    plt.savefig("motion_rotations.svg", dpi=1200)
+    plt.savefig(os.path.join(out_dir, "motion_rotations.svg"), dpi=1200)
     # -------- Plot 2: next 3 columns --------
     plt.figure(figsize=(8, 4))
     for i in range(3, 6):
@@ -150,7 +150,7 @@ def plot_motion_parameters(input_file):
     plt.ylabel("Translation in mm")
     plt.legend(["Read (x)", "Phase (y)", "Slice (z)"])
     plt.tight_layout()
-    plt.savefig("motion_translations.svg", dpi=1200)
+    plt.savefig(os.path.join(out_dir, "motion_translations.svg"), dpi=1200)
 def masking_file(input_file, mask_file, output_file):
     
     math = fsl.maths.ApplyMask()

@@ -32,6 +32,20 @@ def save_session(session_dir, **state):
     return path
 
 
+def figure_folders(analysed_func_dir, analysis_dir, analysed_struct_dir):
+    """Folders for the figures, in the subject folder next to the functional and structural folders (created if missing):
+    "qc" = figures/QC/<functional folder>_<analysis folder>/, "results" = figures/results/<functional folder>_<analysis folder>/,
+    "struct_qc" = figures/QC/<structural folder>/. The preprocessing and the analysis notebook of one run use the same folders."""
+    subject_dir = Path(analysed_func_dir).parent
+    run_label = f"{Path(analysed_func_dir).name}_{Path(analysis_dir).name}"
+    folders = {"qc": subject_dir / "figures" / "QC" / run_label,
+               "results": subject_dir / "figures" / "results" / run_label,
+               "struct_qc": subject_dir / "figures" / "QC" / Path(analysed_struct_dir).name}
+    for folder in folders.values():
+        folder.mkdir(parents=True, exist_ok=True)
+    return folders
+
+
 def read_scan_ranges(analysed_func_dir):
     """(scan, start_volume, end_volume) of every scan in the stitched series, end inclusive."""
     csv_path = Path(analysed_func_dir) / "scan_boundaries.csv"
